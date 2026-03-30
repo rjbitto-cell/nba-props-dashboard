@@ -1,6 +1,6 @@
-player,avg_pts,last5_pts,last10_pts,std_dev,minutes,usage,position
-LeBron James,27.2,28.5,27.9,5.8,35,32,forward
-Stephen Curry,29.4,31.2,30.1,6.5,34,34,guard
-Nikola Jokic,26.1,25.8,26.5,5.2,33,30,center
-Luka Doncic,33.5,34.8,33.9,7.1,36,37,guard
-Jayson Tatum,28.3,29.1,28.7,6.0,35,31,forward
+player,avg_pts,last5_pts,last10_pts,std_dev,minutes,usage,position,minutes_trend
+LeBron James,27.2,28.5,27.9,5.8,35,32,forward,1.05
+Stephen Curry,29.4,31.2,30.1,6.5,34,34,guard,1.08
+Nikola Jokic,26.1,25.8,26.5,5.2,33,30,center,1.00
+Luka Doncic,33.5,34.8,33.9,7.1,36,37,guard,1.10
+Jayson Tatum,28.3,29.1,28.7,6.0,35,31,forward,1.03
