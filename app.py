@@ -5,10 +5,10 @@ import requests
 from scipy.stats import norm
 
 st.set_page_config(page_title="NBA Props Dashboard", layout="wide")
-st.title("🏀 NBA Props Dashboard (PrizePicks)")
+st.title("🏀 NBA Props Dashboard")
 
 # -------------------------
-# LOAD DATA
+# LOAD STATIC DATA
 # -------------------------
 @st.cache_data
 def load_player_data():
@@ -33,58 +33,75 @@ matchups = load_matchups()
 def load_props():
     try:
         url = "https://api.prizepicks.com/projections"
-        res = requests.get(url, timeout=10).json()
+        res = requests.get(url, timeout=10)
+
+        if res.status_code != 200:
+            st.warning("PrizePicks request failed")
+            return pd.DataFrame(columns=["player", "stat", "line", "odds"])
+
+        res = res.json()
 
         data = res.get("data", [])
         included = res.get("included", [])
 
-        players = {
-            p["id"]: p["attributes"]["name"]
-            for p in included if p["type"] == "new_player"
-        }
+        # Build player map safely
+        players = {}
+        for p in included:
+            if p.get("type") == "new_player":
+                players[p["id"]] = p.get("attributes", {}).get("name")
 
         rows = []
 
         for item in data:
-            attr = item["attributes"]
+            try:
+                attr = item.get("attributes", {})
 
-            player_id = item["relationships"]["new_player"]["data"]["id"]
-            name = players.get(player_id)
+                rel = item.get("relationships", {})
+                player_rel = rel.get("new_player", {}).get("data", {})
+                player_id = player_rel.get("id")
 
-            stat = attr.get("stat_type")
-            line = attr.get("line_score")
+                name = players.get(player_id)
 
-            if stat != "Points":
+                stat = attr.get("stat_type")
+                line = attr.get("line_score")
+
+                if not name or stat != "Points" or line is None:
+                    continue
+
+                rows.append({
+                    "player": name,
+                    "stat": stat,
+                    "line": float(line),
+                    "odds": -110
+                })
+
+            except:
                 continue
-
-            rows.append({
-                "player": name,
-                "stat": stat,
-                "line": line,
-                "odds": -110
-            })
 
         df = pd.DataFrame(rows)
 
         if df.empty:
-            st.warning("No PrizePicks data found")
+            st.warning("No PrizePicks props found")
 
         return df
 
-    except:
+    except Exception as e:
         st.error("PrizePicks API failed")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["player", "stat", "line", "odds"])
 
 df = load_props()
 
 # -------------------------
-# NAME CLEANING (IMPORTANT)
+# NAME NORMALIZATION
 # -------------------------
 def normalize_name(name):
-    return name.lower().replace(".", "").strip()
+    return str(name).lower().replace(".", "").strip()
 
-player_data["clean_name"] = player_data["player"].apply(normalize_name)
-df["clean_name"] = df["player"].apply(normalize_name)
+if not player_data.empty:
+    player_data["clean_name"] = player_data["player"].apply(normalize_name)
+
+if not df.empty:
+    df["clean_name"] = df["player"].apply(normalize_name)
 
 # -------------------------
 # EDGE MODEL
@@ -131,7 +148,7 @@ def calculate_edge(row):
         # Variance
         std = pdata["std_dev"]
 
-        # Edge calc
+        # Edge calculation
         edge_multiplier = 1.15
         adj_projection = projection * edge_multiplier
 
@@ -163,12 +180,15 @@ st.subheader("🔥 Best Bets")
 if not df.empty:
     st.dataframe(df.head(20), use_container_width=True)
 
-    player = st.selectbox("Select Player", df["player"].dropna().unique())
-    row = df[df["player"] == player].iloc[0]
+    valid_players = df["player"].dropna().unique()
 
-    st.metric("Projection", round(row["projection"], 2))
-    st.metric("Line", row["line"])
-    st.metric("Edge", f"{round(row['edge']*100,2)}%")
+    if len(valid_players) > 0:
+        player = st.selectbox("Select Player", valid_players)
+        row = df[df["player"] == player].iloc[0]
+
+        st.metric("Projection", round(row["projection"], 2))
+        st.metric("Line", row["line"])
+        st.metric("Edge", f"{round(row['edge'] * 100, 2)}%")
 
 else:
     st.warning("No data available")
