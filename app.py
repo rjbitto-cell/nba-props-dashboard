@@ -44,41 +44,6 @@ st.title("🏀 NBA Props Dashboard")
 # LOAD DATA (API or fallback)
 # -----------------------------------
 @st.cache_data(ttl=60)
-def load_props():
-    API_KEY = st.secrets.get("ODDS_API_KEY", "")
-
-    # If no API key → fallback data
-    if not API_KEY:
-        return pd.DataFrame({
-            "player": ["LeBron James", "Stephen Curry", "Nikola Jokic"],
-            "stat": ["Points", "Points", "Rebounds"],
-            "line": [27.5, 29.5, 11.5],
-            "odds": [-110, -105, -120]
-        })
-
-    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
-
-    params = {
-        "apiKey": API_KEY,
-        "regions": "us",
-        "markets": "player_points"
-    }
-
-    res = requests.get(url, params=params).json()
-
-    rows = []
-    for game in res:
-        for book in game['bookmakers']:
-            for market in book['markets']:
-                for o in market['outcomes']:
-                    rows.append({
-                        "player": o['description'],
-                        "stat": market['key'],
-                        "line": o.get('point', 0),
-                        "odds": o['price']
-                    })
-
-    return pd.DataFrame(rows)
 
 df = load_props()
 
