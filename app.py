@@ -136,7 +136,7 @@ def calculate_edge(row):
         )
 
         # ------------------------
-        # 🔥 MATCHUP (REAL)
+        # 🔥 MATCHUP
         # ------------------------
         match = matchups[matchups['player'] == row['player']]
 
@@ -146,14 +146,14 @@ def calculate_edge(row):
             opponent = None
 
         # ------------------------
-        # 🛡️ DEFENSE ADJUSTMENT
+        # 🛡️ DvP (Defense vs Position)
         # ------------------------
         position = pdata['position']
 
-def_row = defense_data[
-    (defense_data['team'] == opponent) &
-    (defense_data['position'] == position)
-]
+        def_row = defense_data[
+            (defense_data['team'] == opponent) &
+            (defense_data['position'] == position)
+        ]
 
         if not def_row.empty:
             def_rating = def_row.iloc[0]['def_rating']
@@ -168,7 +168,7 @@ def_row = defense_data[
         std = pdata['std_dev']
 
         # ------------------------
-        # 💰 EDGE CALC
+        # 💰 EDGE
         # ------------------------
         prob = 1 - norm.cdf(row['line'], projection, std)
 
