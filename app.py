@@ -1,143 +1,224 @@
+import streamlit as st
 import pandas as pd
-import time
-from nba_api.stats.endpoints import (
-    leaguedashplayerstats,
-    playergamelog,
-    scoreboardv2
-)
+from scipy.stats import norm
+import os
 
-print("🚀 Updating NBA data pipeline...")
+st.set_page_config(page_title="NBA Sharp Props Tool", layout="wide")
+st.title("🏀 NBA Sharp Props Tool")
 
-# -------------------------
-# GET TODAY'S MATCHUPS
-# -------------------------
-print("📅 Fetching today's games...")
-
-games = scoreboardv2.ScoreboardV2().get_data_frames()[0]
-
-matchup_map = {}
-
-for _, game in games.iterrows():
-    home = game["HOME_TEAM_ABBREVIATION"]
-    away = game["VISITOR_TEAM_ABBREVIATION"]
-
-    matchup_map[home] = away
-    matchup_map[away] = home
+IMPLIED_PROB = 0.524
 
 # -------------------------
-# GET PLAYER STATS
+# SAFE DATA LOADER
 # -------------------------
-print("📊 Fetching player stats...")
-
-season_df = leaguedashplayerstats.LeagueDashPlayerStats(
-    season='2025-26',
-    per_mode_detailed='PerGame'
-).get_data_frames()[0]
-
-players = []
-matchups = []
-
-# -------------------------
-# SIMPLE INJURY LIST (MANUAL FOR NOW)
-# -------------------------
-# 👉 You can update this daily if needed
-injured_players = [
-    # Example:
-    # "LeBron James",
-]
-
-# -------------------------
-# PROCESS PLAYERS
-# -------------------------
-print("⚙️ Processing players...")
-
-for _, p in season_df.head(40).iterrows():  # keep fast
+@st.cache_data
+def load_data():
     try:
-        player_id = p["PLAYER_ID"]
-        name = p["PLAYER_NAME"]
-        team = p["TEAM_ABBREVIATION"]
+        files = os.listdir("data")
+        st.sidebar.write("📁 Data files:", files)
 
-        print(f"Processing {name}...")
+        player_data = pd.read_csv("data/player_stats.csv")
+        defense_data = pd.read_csv("data/team_defense.csv")
+        matchups = pd.read_csv("data/matchups.csv")
 
-        # -------------------------
-        # GAME LOGS
-        # -------------------------
-        gamelog = playergamelog.PlayerGameLog(
-            player_id=player_id,
-            season='2025-26'
-        ).get_data_frames()[0]
+        if player_data.empty:
+            raise ValueError("player_stats.csv is empty")
 
-        last5 = gamelog.head(5)
-        last10 = gamelog.head(10)
-
-        last5_pts = last5["PTS"].mean() if not last5.empty else p["PTS"]
-        last10_pts = last10["PTS"].mean() if not last10.empty else p["PTS"]
-
-        # -------------------------
-        # MATCHUP
-        # -------------------------
-        opponent = matchup_map.get(team, None)
-
-        if opponent:
-            matchups.append({
-                "player": name,
-                "opponent": opponent
-            })
-
-        # -------------------------
-        # INJURY BOOST (simple)
-        # -------------------------
-        usage_boost = 1.0
-
-        # if teammate injured → boost (basic logic)
-        if name not in injured_players:
-            # simulate: if ANY teammate injured → small boost
-            usage_boost = 1.05
-
-        # -------------------------
-        # BUILD PLAYER ROW
-        # -------------------------
-        players.append({
-            "player": name,
-            "team": team,
-            "position": "SG",
-            "minutes": p["MIN"],
-            "minutes_trend": 1.0,
-            "avg_pts": p["PTS"] * usage_boost,
-            "avg_reb": p["REB"],
-            "avg_ast": p["AST"],
-            "last5_pts": round(last5_pts * usage_boost, 1),
-            "last10_pts": round(last10_pts * usage_boost, 1),
-            "fg_pct": p["FG_PCT"],
-            "std_dev": max(p["PTS"] * 0.25, 1),
-            "reb_std": max(p["REB"] * 0.3, 1),
-            "ast_std": max(p["AST"] * 0.3, 1),
-        })
-
-        time.sleep(0.6)
+        return player_data, defense_data, matchups
 
     except Exception as e:
-        print(f"Skipping {name}: {e}")
-        continue
+        st.error(f"⚠️ Data load failed: {e}")
+        return fallback_data()
 
 # -------------------------
-# SAVE FILES
+# FALLBACK DATA (NEVER BREAKS)
 # -------------------------
-print("💾 Saving CSV files...")
-
-player_df = pd.DataFrame(players)
-matchup_df = pd.DataFrame(matchups)
-
-# fallback if no games today
-if matchup_df.empty:
-    matchup_df = pd.DataFrame({
-        "player": player_df["player"],
-        "opponent": "UNK"
+def fallback_data():
+    player_data = pd.DataFrame({
+        "player": ["LeBron James", "Stephen Curry"],
+        "team": ["LAL", "GSW"],
+        "position": ["SF", "PG"],
+        "minutes": [35, 34],
+        "minutes_trend": [1.0, 1.0],
+        "avg_pts": [27, 29],
+        "avg_reb": [8, 5],
+        "avg_ast": [7, 6],
+        "last5_pts": [28, 30],
+        "last10_pts": [27, 29],
+        "fg_pct": [0.5, 0.48],
+        "std_dev": [6, 7],
+        "reb_std": [3, 2],
+        "ast_std": [3, 3],
     })
 
-player_df.to_csv("data/player_stats.csv", index=False)
-matchup_df.to_csv("data/matchups.csv", index=False)
+    defense_data = pd.DataFrame({
+        "team": ["LAL", "GSW"],
+        "position": ["PG", "SF"],
+        "def_rating": [112, 110]
+    })
 
-print("✅ player_stats.csv updated")
-print("✅ matchups.csv updated")
-print("🎯 Pipeline complete")
+    matchups = pd.DataFrame({
+        "player": ["LeBron James", "Stephen Curry"],
+        "opponent": ["GSW", "LAL"]
+    })
+
+    return player_data, defense_data, matchups
+
+player_data, defense_data, matchups = load_data()
+
+# -------------------------
+# INJURY INPUT
+# -------------------------
+st.sidebar.header("🚑 Injuries")
+
+injured_players = st.sidebar.multiselect(
+    "Select Out Players",
+    player_data["player"].unique()
+)
+
+# -------------------------
+# PROJECTION MODEL
+# -------------------------
+def calculate_projection(pdata, stat):
+    try:
+        minutes = pdata["minutes"]
+        trend = pdata["minutes_trend"]
+
+        minute_factor = max(0.8, min(1.2, trend))
+
+        usage_proxy = (pdata["avg_pts"] + pdata["avg_ast"]) / max(minutes, 1)
+        usage_factor = max(0.85, min(1.15, usage_proxy / 1.5))
+
+        efficiency_factor = 1 + ((pdata["fg_pct"] - 0.45) * 0.3)
+
+        # -------------------------
+        # INJURY BOOST
+        # -------------------------
+        team = pdata["team"]
+
+        team_injuries = player_data[
+            (player_data["team"] == team) &
+            (player_data["player"].isin(injured_players))
+        ]
+
+        injury_boost = 1 + (0.05 * len(team_injuries))
+
+        # -------------------------
+        # BASE
+        # -------------------------
+        if stat == "Points":
+            base = (
+                0.4 * pdata["last5_pts"] +
+                0.4 * pdata["last10_pts"] +
+                0.2 * pdata["avg_pts"]
+            )
+            projection = base * minute_factor * usage_factor * efficiency_factor * injury_boost
+            std = max(pdata["std_dev"], 1)
+
+        elif stat == "Rebounds":
+            base = pdata["avg_reb"]
+            projection = base * minute_factor * injury_boost
+            std = max(pdata["reb_std"], 1)
+
+        elif stat == "Assists":
+            base = pdata["avg_ast"]
+            projection = base * usage_factor * injury_boost
+            std = max(pdata["ast_std"], 1)
+
+        else:
+            return None, None
+
+        # -------------------------
+        # DVP
+        # -------------------------
+        matchup = matchups[matchups["player"] == pdata["player"]]
+
+        if not matchup.empty:
+            opponent = matchup.iloc[0]["opponent"]
+
+            def_row = defense_data[
+                (defense_data["team"] == opponent) &
+                (defense_data["position"] == pdata["position"])
+            ]
+
+            if not def_row.empty:
+                def_rating = def_row.iloc[0]["def_rating"]
+                league_avg = defense_data["def_rating"].mean()
+                projection *= (league_avg / def_rating)
+
+        return projection, std
+
+    except:
+        return None, None
+
+# -------------------------
+# BUILD DATA
+# -------------------------
+rows = []
+
+for _, pdata in player_data.iterrows():
+    for stat in ["Points", "Rebounds", "Assists"]:
+        projection, std = calculate_projection(pdata, stat)
+
+        if projection is None:
+            continue
+
+        rows.append({
+            "player": pdata["player"],
+            "stat": stat,
+            "projection": round(projection, 2),
+            "std": std
+        })
+
+df = pd.DataFrame(rows)
+
+# -------------------------
+# USER INPUT
+# -------------------------
+st.subheader("✍️ Enter Sportsbook Lines")
+
+input_df = df.copy()
+input_df["line"] = ""
+
+input_df = st.data_editor(input_df, use_container_width=True)
+
+# -------------------------
+# EDGE
+# -------------------------
+def calculate_edge(row):
+    try:
+        if row["line"] == "" or pd.isna(row["line"]):
+            return None
+
+        prob = 1 - norm.cdf(float(row["line"]), row["projection"], row["std"])
+        return prob - IMPLIED_PROB
+    except:
+        return None
+
+input_df["edge"] = input_df.apply(calculate_edge, axis=1)
+
+# -------------------------
+# DISPLAY
+# -------------------------
+st.subheader("🔥 Best Value Bets")
+
+filtered = input_df.dropna(subset=["edge"])
+
+if filtered.empty:
+    st.warning("No edges yet — enter sportsbook lines above")
+else:
+    filtered = filtered.sort_values(by="edge", ascending=False)
+    st.dataframe(filtered.head(25), use_container_width=True)
+
+# -------------------------
+# PLAYER DETAIL
+# -------------------------
+st.subheader("🔍 Player Detail")
+
+if not filtered.empty:
+    player = st.selectbox("Select Player", filtered["player"].unique())
+    row = filtered[filtered["player"] == player].iloc[0]
+
+    st.metric("Projection", row["projection"])
+    st.metric("Line", row["line"])
+    st.metric("Edge", f"{round(row['edge'] * 100, 2)}%")
