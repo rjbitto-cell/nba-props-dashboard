@@ -2,160 +2,155 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
-from nba_api.stats.endpoints import playergamelog, commonteamroster, leaguedashplayerstats
-from nba_api.stats.static import players, teams
-import datetime
+from nba_api.stats.endpoints import playergamelog
+from nba_api.stats.static import players
 
-st.set_page_config(page_title="NBA Props Dashboard (Live)", layout="wide")
-st.title("🏀 NBA Props Dashboard (Live)")
-
-# -------------------------
-# CONFIG
-# -------------------------
-POSITION_LIST = ["PG", "SG", "SF", "PF", "C"]
-EDGE_MULTIPLIER = 1.15
-IMPLIED_PROB = 0.524  # baseline implied probability for -110 odds
+st.set_page_config(page_title="NBA Sharp Props Tool", layout="wide")
+st.title("🏀 NBA Sharp Props Tool")
 
 # -------------------------
-# HELPER FUNCTIONS
+# SETTINGS
+# -------------------------
+SEASON = "2025-26"
+IMPLIED_PROB = 0.524
+
+# -------------------------
+# HELPERS
 # -------------------------
 def get_player_id(name):
-    """Get NBA API player ID"""
     p = players.find_players_by_full_name(name)
     return p[0]['id'] if p else None
 
-def get_recent_games(player_id, season='2025-26', last_n=10):
-    """Fetch last N games for player"""
-    gl = playergamelog.PlayerGameLog(player_id=player_id, season=season).get_data_frames()[0]
-    return gl.head(last_n)
+@st.cache_data(ttl=3600)
+def get_active_players():
+    return players.get_active_players()
 
-def get_season_avg(player_id, season='2025-26'):
-    """Get season averages for a player"""
-    gl = playergamelog.PlayerGameLog(player_id=player_id, season=season).get_data_frames()[0]
-    if gl.empty:
+@st.cache_data(ttl=600)
+def get_logs(player_id):
+    df = playergamelog.PlayerGameLog(player_id=player_id, season=SEASON).get_data_frames()[0]
+    return df
+
+def calculate_projection(logs):
+    if len(logs) < 5:
         return None
-    return gl.mean(numeric_only=True)
 
-def get_team_defense():
-    """Simplified team defense vs position (mock example)"""
-    # In a real version, pull advanced stats from nba_api / team box scores
-    return pd.DataFrame({
-        "team": ["LAL","GSW","BKN","MIA"],
-        "position": ["PG","SG","SF","PF"],
-        "def_rating": [105, 102, 108, 103]
-    })
+    last5 = logs.head(5)
+    last10 = logs.head(10)
 
-def get_injury_list():
-    """Simplified injuries (for example purposes)"""
-    return {"LeBron James": True, "Stephen Curry": False}  # True = out
+    # Base stats
+    pts = 0.4*last5['PTS'].mean() + 0.4*last10['PTS'].mean() + 0.2*logs['PTS'].mean()
+    reb = 0.4*last5['REB'].mean() + 0.4*last10['REB'].mean() + 0.2*logs['REB'].mean()
+    ast = 0.4*last5['AST'].mean() + 0.4*last10['AST'].mean() + 0.2*logs['AST'].mean()
 
-def normalize_name(name):
-    return str(name).lower().replace(".", "").strip()
+    # Minutes trend (usage proxy)
+    minutes_avg = logs['MIN'].mean()
+    minutes_recent = last5['MIN'].mean()
+    trend = minutes_recent / max(minutes_avg, 1)
+
+    pts *= trend
+    reb *= trend
+    ast *= trend
+
+    # Std dev for probability calc
+    std_pts = max(last10['PTS'].std(), 1)
+    std_reb = max(last10['REB'].std(), 1)
+    std_ast = max(last10['AST'].std(), 1)
+
+    return {
+        "PTS": (pts, std_pts),
+        "REB": (reb, std_reb),
+        "AST": (ast, std_ast)
+    }
 
 # -------------------------
-# LOAD DATA
+# LOAD PLAYERS
 # -------------------------
-st.subheader("Fetching live player data...")
-all_players = players.get_active_players()
+players_list = get_active_players()
 
-team_defense = get_team_defense()
-injuries = get_injury_list()
+# Limit for performance (you can increase later)
+players_list = players_list[:50]
 
-# -------------------------
-# BUILD PROJECTION + EDGE
-# -------------------------
 rows = []
-for p in all_players:
+
+st.subheader("📊 Generating projections...")
+
+for p in players_list:
     try:
-        player_id = p['id']
         name = p['full_name']
-        clean_name = normalize_name(name)
+        pid = p['id']
 
-        # -------------------------
-        # FETCH STATS
-        # -------------------------
-        last5 = get_recent_games(player_id, last_n=5)
-        last10 = get_recent_games(player_id, last_n=10)
-        season_avg = get_season_avg(player_id)
+        logs = get_logs(pid)
 
-        if last5.empty or season_avg is None:
+        proj = calculate_projection(logs)
+        if not proj:
             continue
 
-        minutes = season_avg['MIN'] if season_avg['MIN'] > 0 else 25
-        points_avg = (0.4*last5['PTS'].mean() + 0.4*last10['PTS'].mean() + 0.2*season_avg['PTS'])
-        rebounds_avg = (0.4*last5['REB'].mean() + 0.4*last10['REB'].mean() + 0.2*season_avg['REB'])
-        assists_avg = (0.4*last5['AST'].mean() + 0.4*last10['AST'].mean() + 0.2*season_avg['AST'])
+        for stat in ["PTS", "REB", "AST"]:
+            projection, std = proj[stat]
 
-        # minutes trend spike
-        minutes_trend = last5['MIN'].mean() / max(season_avg['MIN'],1)
-
-        # adjust for injuries (simplified)
-        injury_adj = 1.0
-        if injuries.get(name, False):
-            injury_adj = 0  # player out → projection zero
-        else:
-            # could boost teammates if a teammate is out, simplified here
-            injury_adj = 1.0
-
-        # DvP adjustment vs opponent/position
-        # simplified: pick a random position and match to team_defense table
-        opponent_def = team_defense.sample(1).iloc[0]
-        def_rating = opponent_def['def_rating']
-        league_avg_def = team_defense['def_rating'].mean()
-        dvp_adj = league_avg_def / def_rating
-
-        # -------------------------
-        # FINAL PROJECTIONS
-        # -------------------------
-        proj_points = points_avg * minutes_trend * dvp_adj * injury_adj * EDGE_MULTIPLIER
-        proj_rebounds = rebounds_avg * minutes_trend * dvp_adj * injury_adj * EDGE_MULTIPLIER
-        proj_assists = assists_avg * minutes_trend * dvp_adj * injury_adj * EDGE_MULTIPLIER
-
-        # -------------------------
-        # USE PRIZEPICKS LINE (example placeholder)
-        # -------------------------
-        line_points = proj_points * 0.95  # placeholder line, replace with real feed
-        line_rebounds = proj_rebounds * 0.95
-        line_assists = proj_assists * 0.95
-
-        # -------------------------
-        # EDGE CALCULATION
-        # -------------------------
-        std_pts = max(last10['PTS'].std(), 1)
-        prob_pts = 1 - norm.cdf(line_points, proj_points, std_pts)
-        edge_pts = prob_pts - IMPLIED_PROB
-
-        std_reb = max(last10['REB'].std(), 1)
-        prob_reb = 1 - norm.cdf(line_rebounds, proj_rebounds, std_reb)
-        edge_reb = prob_reb - IMPLIED_PROB
-
-        std_ast = max(last10['AST'].std(), 1)
-        prob_ast = 1 - norm.cdf(line_assists, proj_assists, std_ast)
-        edge_ast = prob_ast - IMPLIED_PROB
-
-        # append rows
-        rows.append({"player": name, "stat": "Points", "projection": proj_points, "line": line_points, "edge": edge_pts})
-        rows.append({"player": name, "stat": "Rebounds", "projection": proj_rebounds, "line": line_rebounds, "edge": edge_reb})
-        rows.append({"player": name, "stat": "Assists", "projection": proj_assists, "line": line_assists, "edge": edge_ast})
+            rows.append({
+                "player": name,
+                "stat": stat,
+                "projection": round(projection, 2),
+                "std": std
+            })
 
     except:
         continue
 
-# -------------------------
-# BUILD DATAFRAME
-# -------------------------
 df = pd.DataFrame(rows)
-df = df.sort_values(by="edge", ascending=False)
 
 # -------------------------
-# UI
+# USER INPUT (SPORTSBOOK LINES)
 # -------------------------
-st.subheader("🔥 Top 25 Edge Bets")
-st.dataframe(df.head(25), use_container_width=True)
+st.subheader("✍️ Enter Sportsbook Lines")
 
-player = st.selectbox("Select Player", df["player"].unique())
-row = df[df["player"] == player].iloc[0]
+input_df = df.copy()
+input_df["line"] = ""
 
-st.metric("Projection", round(row["projection"],2))
-st.metric("Line", round(row["line"],2))
-st.metric("Edge", f"{round(row['edge']*100,2)}%")
+input_df = st.data_editor(input_df, use_container_width=True)
+
+# -------------------------
+# EDGE CALCULATION
+# -------------------------
+def calculate_edge(row):
+    try:
+        if row["line"] == "" or pd.isna(row["line"]):
+            return None
+
+        line = float(row["line"])
+        projection = row["projection"]
+        std = row["std"]
+
+        prob = 1 - norm.cdf(line, projection, std)
+        edge = prob - IMPLIED_PROB
+
+        return edge
+    except:
+        return None
+
+input_df["edge"] = input_df.apply(calculate_edge, axis=1)
+
+# -------------------------
+# FILTER + DISPLAY
+# -------------------------
+st.subheader("🔥 Best Value Bets")
+
+filtered = input_df.dropna(subset=["edge"])
+filtered = filtered.sort_values(by="edge", ascending=False)
+
+st.dataframe(filtered.head(25), use_container_width=True)
+
+# -------------------------
+# PLAYER VIEW
+# -------------------------
+st.subheader("🔍 Player Detail")
+
+player = st.selectbox("Select Player", filtered["player"].unique() if not filtered.empty else [])
+
+if player:
+    row = filtered[filtered["player"] == player].iloc[0]
+
+    st.metric("Projection", row["projection"])
+    st.metric("Line", row["line"])
+    st.metric("Edge", f"{round(row['edge']*100,2)}%")
