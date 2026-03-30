@@ -1,21 +1,2 @@
 player,team,position,minutes,minutes_trend,avg_pts,avg_reb,avg_ast,last5_pts,last10_pts,fg_pct,std_dev,reb_std,ast_std
-LeBron James,LAL,SF,35,1.05,27.5,8.2,7.3,29.0,28.0,0.51,6,3,3
-Stephen Curry,GSW,PG,34,1.02,29.8,5.1,6.2,31.0,30.0,0.48,7,2,3
-Nikola Jokic,DEN,C,36,1.00,26.4,12.3,9.1,27.0,26.0,0.58,5,4,4
-Luka Doncic,DAL,PG,37,1.08,32.1,8.7,8.5,34.0,33.0,0.49,8,3,4
-Giannis Antetokounmpo,MIL,PF,35,1.04,30.2,11.5,5.8,31.0,30.0,0.55,7,4,3
-Jayson Tatum,BOS,SF,36,1.01,28.5,8.3,4.5,29.0,28.0,0.47,6,3,2
-Kevin Durant,PHX,SF,35,1.03,29.1,6.7,5.0,30.0,29.0,0.52,6,2,2
-Devin Booker,PHX,SG,36,1.02,27.8,4.8,6.5,28.0,27.0,0.49,6,2,3
-Damian Lillard,MIL,PG,35,1.01,28.0,4.5,7.0,29.0,28.0,0.46,7,2,3
-Anthony Davis,LAL,PF,34,1.00,24.5,12.0,3.2,25.0,24.0,0.54,6,4,2
-Joel Embiid,PHI,C,35,1.06,33.0,10.5,4.2,34.0,33.0,0.53,8,3,2
-Kawhi Leonard,LAC,SF,33,1.00,25.0,6.5,3.8,26.0,25.0,0.51,5,2,2
-Paul George,LAC,SG,34,1.00,23.5,5.8,4.2,24.0,23.0,0.47,6,2,2
-Jimmy Butler,MIA,SF,34,1.02,22.0,5.5,5.0,23.0,22.0,0.49,5,2,2
-Trae Young,ATL,PG,36,1.03,27.0,3.0,10.5,28.0,27.0,0.44,8,1,4
-Donovan Mitchell,CLE,SG,35,1.02,28.3,4.3,5.2,29.0,28.0,0.48,7,2,3
-De'Aaron Fox,SAC,PG,35,1.01,26.5,4.2,6.0,27.0,26.0,0.50,6,2,3
-Tyrese Haliburton,IND,PG,34,1.03,24.0,4.0,11.0,25.0,24.0,0.49,6,2,4
-Jalen Brunson,NYK,PG,35,1.04,26.0,3.5,6.8,27.0,26.0,0.48,6,2,3
-Zion Williamson,NOP,PF,33,1.05,25.5,6.5,4.0,26.0,25.0,0.60,6,3,2
+LeBron James,LAL,SF,35,1.0,27,8,7,28,27,0.5,6,3,3
