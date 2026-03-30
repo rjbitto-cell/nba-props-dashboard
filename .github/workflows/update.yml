@@ -2,7 +2,7 @@ name: Update NBA Data
 
 on:
   schedule:
-    - cron: '0 15 * * *'  # runs daily
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
@@ -11,10 +11,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4   # ✅ UPDATED
 
-      - name: Install Python
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5   # ✅ UPDATED
         with:
           python-version: '3.10'
 
@@ -28,6 +28,6 @@ jobs:
         run: |
           git config --global user.name "bot"
           git config --global user.email "bot@github.com"
-          git add data/player_stats.csv
+          git add data/player_stats.csv data/matchups.csv
           git commit -m "auto update data" || echo "No changes"
           git push
