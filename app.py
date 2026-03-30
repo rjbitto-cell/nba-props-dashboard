@@ -8,47 +8,29 @@ st.title("🏀 NBA Sharp Props Tool")
 IMPLIED_PROB = 0.524
 
 # -------------------------
-# LOAD CSV DATA (PRIMARY SOURCE)
+# LOAD CSV DATA
 # -------------------------
 @st.cache_data
-def load_csv_data():
+def load_data():
     player_data = pd.read_csv("data/player_stats.csv")
     defense_data = pd.read_csv("data/team_defense.csv")
     matchups = pd.read_csv("data/matchups.csv")
     return player_data, defense_data, matchups
 
-player_data, defense_data, matchups = load_csv_data()
+player_data, defense_data, matchups = load_data()
 
 # -------------------------
-# OPTIONAL LIVE UPDATE (SAFE)
+# INJURY INPUT (MANUAL)
 # -------------------------
-def try_live_update():
-    try:
-        from nba_api.stats.endpoints import leaguedashplayerstats
+st.sidebar.header("🚑 Injuries")
 
-        df = leaguedashplayerstats.LeagueDashPlayerStats(
-            season='2025-26',
-            per_mode_detailed='PerGame',
-            timeout=5
-        ).get_data_frames()[0]
-
-        return df
-
-    except:
-        return None
-
-live_data = try_live_update()
+injured_players = st.sidebar.multiselect(
+    "Select Out Players",
+    player_data["player"].unique()
+)
 
 # -------------------------
-# NORMALIZE NAMES
-# -------------------------
-def normalize_name(name):
-    return str(name).lower().replace(".", "").strip()
-
-player_data["clean_name"] = player_data["player"].apply(normalize_name)
-
-# -------------------------
-# SMART PROJECTION MODEL
+# PROJECTION ENGINE
 # -------------------------
 def calculate_projection(pdata, stat):
     try:
@@ -62,27 +44,62 @@ def calculate_projection(pdata, stat):
 
         efficiency_factor = 1 + ((pdata["fg_pct"] - 0.45) * 0.3)
 
+        # -------------------------
+        # INJURY BOOST
+        # -------------------------
+        team = pdata["team"]
+
+        team_injuries = player_data[
+            (player_data["team"] == team) &
+            (player_data["player"].isin(injured_players))
+        ]
+
+        injury_boost = 1 + (0.05 * len(team_injuries))  # +5% per injured teammate
+
+        # -------------------------
+        # BASE PROJECTION
+        # -------------------------
         if stat == "Points":
             base = (
                 0.4 * pdata["last5_pts"] +
                 0.4 * pdata["last10_pts"] +
                 0.2 * pdata["avg_pts"]
             )
-            projection = base * minute_factor * usage_factor * efficiency_factor
+            projection = base * minute_factor * usage_factor * efficiency_factor * injury_boost
             std = max(pdata["std_dev"], 1)
 
         elif stat == "Rebounds":
             base = pdata["avg_reb"]
-            projection = base * minute_factor
+            projection = base * minute_factor * injury_boost
             std = max(pdata.get("reb_std", 2), 1)
 
         elif stat == "Assists":
             base = pdata["avg_ast"]
-            projection = base * usage_factor
+            projection = base * usage_factor * injury_boost
             std = max(pdata.get("ast_std", 2), 1)
 
         else:
             return None, None
+
+        # -------------------------
+        # DvP ADJUSTMENT
+        # -------------------------
+        matchup = matchups[matchups["player"] == pdata["player"]]
+
+        if not matchup.empty:
+            opponent = matchup.iloc[0]["opponent"]
+
+            def_row = defense_data[
+                (defense_data["team"] == opponent) &
+                (defense_data["position"] == pdata["position"])
+            ]
+
+            if not def_row.empty:
+                def_rating = def_row.iloc[0]["def_rating"]
+                league_avg = defense_data["def_rating"].mean()
+
+                dvp_factor = league_avg / def_rating
+                projection *= dvp_factor
 
         return projection, std
 
@@ -90,7 +107,7 @@ def calculate_projection(pdata, stat):
         return None, None
 
 # -------------------------
-# BUILD PROPS TABLE
+# BUILD TABLE
 # -------------------------
 rows = []
 
@@ -111,7 +128,7 @@ for _, pdata in player_data.iterrows():
 df = pd.DataFrame(rows)
 
 # -------------------------
-# USER INPUT (LINES)
+# USER INPUT
 # -------------------------
 st.subheader("✍️ Enter Sportsbook Lines")
 
@@ -121,7 +138,7 @@ input_df["line"] = ""
 input_df = st.data_editor(input_df, use_container_width=True)
 
 # -------------------------
-# EDGE CALCULATION
+# EDGE
 # -------------------------
 def calculate_edge(row):
     try:
@@ -129,14 +146,10 @@ def calculate_edge(row):
             return None
 
         line = float(row["line"])
-        projection = row["projection"]
-        std = row["std"]
-
-        prob = 1 - norm.cdf(line, projection, std)
+        prob = 1 - norm.cdf(line, row["projection"], row["std"])
         edge = prob - IMPLIED_PROB
 
         return edge
-
     except:
         return None
 
@@ -153,7 +166,7 @@ filtered = filtered.sort_values(by="edge", ascending=False)
 st.dataframe(filtered.head(25), use_container_width=True)
 
 # -------------------------
-# PLAYER DETAIL
+# DETAIL
 # -------------------------
 st.subheader("🔍 Player Detail")
 
