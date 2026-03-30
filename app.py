@@ -129,11 +129,24 @@ def calculate_edge(row):
 
         pdata = pdata.iloc[0]
 
-        projection = (
-            0.4 * pdata['last5_pts'] +
-            0.4 * pdata['last10_pts'] +
-            0.2 * pdata['avg_pts']
-        )
+        base_projection = (
+    0.4 * pdata['last5_pts'] +
+    0.4 * pdata['last10_pts'] +
+    0.2 * pdata['avg_pts']
+)
+
+# ------------------------
+# 🔥 MINUTES MODEL
+# ------------------------
+minutes = pdata['minutes']
+trend = pdata['minutes_trend']
+
+adjusted_minutes = minutes * trend
+
+# Convert to per-minute production
+ppm = base_projection / minutes
+
+projection = ppm * adjusted_minutes
 
         # ------------------------
         # 🔥 MATCHUP
