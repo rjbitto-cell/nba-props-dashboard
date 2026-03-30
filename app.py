@@ -43,7 +43,6 @@ st.title("🏀 NBA Props Dashboard")
 # -----------------------------------
 # LOAD DATA (API or fallback)
 # -----------------------------------
-@st.cache_data(ttl=60)
 
 df = load_props()
 
