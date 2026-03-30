@@ -3,6 +3,27 @@ import pandas as pd
 import numpy as np
 import requests
 
+import requests
+
+@st.cache_data(ttl=300)
+def load_real_props():
+    try:
+        API_KEY = st.secrets.get("ODDS_API_KEY", None)
+
+        if API_KEY is None:
+            return None
+
+        url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=player_points"
+
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        return data
+
+    except:
+        return None
+
+
 @st.cache_data
 def load_player_data():
     return pd.read_csv("data/player_stats.csv")
@@ -117,6 +138,13 @@ player_data = load_player_data()
 defense_data = load_defense_data()
 matchups = load_matchups()
 
+real_data = load_real_props()
+
+if real_data:
+    st.write("Using REAL data ✅")
+else:
+    st.write("Using SAMPLE data ⚠️")
+    
 def calculate_edge(row):
     try:
         # ------------------------
@@ -184,8 +212,11 @@ def calculate_edge(row):
         # ------------------------
         # 💰 EDGE
         # ------------------------
-        prob = 1 - norm.cdf(row['line'], projection, std)
+       edge_multiplier = 1.15  # 🔥 tweak this (1.1–1.3 range)
 
+adjusted_projection = projection * edge_multiplier
+
+prob = 1 - norm.cdf(row['line'], adjusted_projection, std)
         odds = row.get('odds', -110)
         if odds > 0:
             implied = 100 / (odds + 100)
