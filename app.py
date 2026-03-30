@@ -67,34 +67,107 @@ def get_player_logs(player_name):
         return None
 
 
+from nba_api.stats.endpoints import playergamelog, leaguedashteamstats
+from nba_api.stats.static import players
+from scipy.stats import norm
+import pandas as pd
+import numpy as np
+
+@st.cache_data(ttl=3600)
+def get_player_logs(player_name):
+    try:
+        player_id = players.find_players_by_full_name(player_name)[0]['id']
+        logs = playergamelog.PlayerGameLog(player_id=player_id)
+        df = logs.get_data_frames()[0]
+        return df
+    except:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def get_team_defense():
+    stats = leaguedashteamstats.LeagueDashTeamStats()
+    df = stats.get_data_frames()[0]
+    return df[['TEAM_NAME', 'DEF_RATING']]
+
+
+def extract_opponent(matchup):
+    try:
+        return matchup.split("vs. ")[-1] if "vs." in matchup else matchup.split("@ ")[-1]
+    except:
+        return None
+
+
 def calculate_edge(row):
     logs = get_player_logs(row['player'])
 
-    if logs is None or len(logs) < 5:
+    if logs is None or len(logs) < 10:
         return row['line'], 0
 
-    # Convert to numeric
     logs['PTS'] = pd.to_numeric(logs['PTS'])
+    logs['MIN'] = pd.to_numeric(logs['MIN'])
 
-    # Features
-    last5 = logs.head(5)['PTS'].mean()
-    last10 = logs.head(10)['PTS'].mean()
-    std = logs['PTS'].std()
+    # ------------------------
+    # 🔥 CORE FEATURES
+    # ------------------------
 
-    usage = logs['FGA'].mean() + 0.44 * logs['FTA'].mean()
+    last5 = logs.head(5)
+    last10 = logs.head(10)
 
-    # Projection formula (weighted)
-    projection = (
-        0.5 * last5 +
-        0.3 * last10 +
-        0.2 * (usage / 2)
+    # Minutes = most important predictor
+    min_last5 = last5['MIN'].mean()
+
+    # Usage proxy
+    usage = (
+        last10['FGA'].mean() +
+        0.44 * last10['FTA'].mean() +
+        last10['TOV'].mean()
     )
 
-    # Probability of hitting OVER
+    # Efficiency
+    pts_per_min = last10['PTS'].sum() / last10['MIN'].sum()
+
+    # Base projection
+    base_projection = min_last5 * pts_per_min
+
+    # ------------------------
+    # 🧠 MATCHUP ADJUSTMENT
+    # ------------------------
+
+    opponent = extract_opponent(logs.iloc[0]['MATCHUP'])
+    defense_df = get_team_defense()
+
+    def_rating = defense_df[
+        defense_df['TEAM_NAME'].str.contains(opponent, case=False, na=False)
+    ]['DEF_RATING']
+
+    if len(def_rating) > 0:
+        def_rating = def_rating.values[0]
+        league_avg = defense_df['DEF_RATING'].mean()
+
+        matchup_boost = league_avg / def_rating
+    else:
+        matchup_boost = 1
+
+    projection = base_projection * matchup_boost
+
+    # ------------------------
+    # 📊 VOLATILITY MODEL
+    # ------------------------
+
+    std = last10['PTS'].std()
+
+    if std == 0 or np.isnan(std):
+        std = 5
+
+    # ------------------------
+    # 💰 PROBABILITY + EDGE
+    # ------------------------
+
     prob = 1 - norm.cdf(row['line'], projection, std)
 
-    # Convert odds to implied probability
     odds = row.get('odds', -110)
+
     if odds > 0:
         implied = 100 / (odds + 100)
     else:
