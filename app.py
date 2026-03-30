@@ -52,9 +52,56 @@ df = load_props()
 # -----------------------------------
 # SIMPLE PROJECTION MODEL (TEMP)
 # -----------------------------------
+from nba_api.stats.endpoints import playergamelog
+from nba_api.stats.static import players
+from scipy.stats import norm
+
+@st.cache_data(ttl=3600)
+def get_player_logs(player_name):
+    try:
+        player_id = players.find_players_by_full_name(player_name)[0]['id']
+        logs = playergamelog.PlayerGameLog(player_id=player_id)
+        df = logs.get_data_frames()[0]
+        return df
+    except:
+        return None
+
+
 def calculate_edge(row):
-    projection = row['line'] + np.random.uniform(-3, 5)
-    edge = (projection - row['line']) / row['line']
+    logs = get_player_logs(row['player'])
+
+    if logs is None or len(logs) < 5:
+        return row['line'], 0
+
+    # Convert to numeric
+    logs['PTS'] = pd.to_numeric(logs['PTS'])
+
+    # Features
+    last5 = logs.head(5)['PTS'].mean()
+    last10 = logs.head(10)['PTS'].mean()
+    std = logs['PTS'].std()
+
+    usage = logs['FGA'].mean() + 0.44 * logs['FTA'].mean()
+
+    # Projection formula (weighted)
+    projection = (
+        0.5 * last5 +
+        0.3 * last10 +
+        0.2 * (usage / 2)
+    )
+
+    # Probability of hitting OVER
+    prob = 1 - norm.cdf(row['line'], projection, std)
+
+    # Convert odds to implied probability
+    odds = row.get('odds', -110)
+    if odds > 0:
+        implied = 100 / (odds + 100)
+    else:
+        implied = -odds / (-odds + 100)
+
+    edge = prob - implied
+
     return projection, edge
 
 df[['projection', 'edge']] = df.apply(
