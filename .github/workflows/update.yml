@@ -1,5 +1,8 @@
 name: Update NBA Data
 
+permissions:
+  contents: write
+  
 on:
   schedule:
     - cron: '0 15 * * *'
