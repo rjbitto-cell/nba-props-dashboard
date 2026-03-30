@@ -210,13 +210,14 @@ def calculate_edge(row):
         std = pdata['std_dev']
 
         # ------------------------
-        # 💰 EDGE
+        # 💰 EDGE CALC
         # ------------------------
-       edge_multiplier = 1.15  # 🔥 tweak this (1.1–1.3 range)
+        edge_multiplier = 1.15
 
-adjusted_projection = projection * edge_multiplier
+        adjusted_projection = projection * edge_multiplier
 
-prob = 1 - norm.cdf(row['line'], adjusted_projection, std)
+        prob = 1 - norm.cdf(row['line'], adjusted_projection, std)
+
         odds = row.get('odds', -110)
         if odds > 0:
             implied = 100 / (odds + 100)
