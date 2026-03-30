@@ -1,102 +1,112 @@
 import streamlit as st
 import pandas as pd
 from scipy.stats import norm
-from nba_api.stats.endpoints import leaguedashplayerstats
 
 st.set_page_config(page_title="NBA Sharp Props Tool", layout="wide")
 st.title("🏀 NBA Sharp Props Tool")
 
-# -------------------------
-# SETTINGS
-# -------------------------
-IMPLIED_PROB = 0.524  # -110 odds baseline
+IMPLIED_PROB = 0.524
 
 # -------------------------
-# LOAD DATA (FAST - ONE CALL)
+# LOAD CSV DATA (PRIMARY SOURCE)
 # -------------------------
-@st.cache_data(ttl=600)
-def load_player_stats():
-    df = leaguedashplayerstats.LeagueDashPlayerStats(
-        season='2025-26',
-        per_mode_detailed='PerGame'
-    ).get_data_frames()[0]
-    return df
+@st.cache_data
+def load_csv_data():
+    player_data = pd.read_csv("data/player_stats.csv")
+    defense_data = pd.read_csv("data/team_defense.csv")
+    matchups = pd.read_csv("data/matchups.csv")
+    return player_data, defense_data, matchups
 
-st.subheader("📊 Generating smart projections...")
-
-player_stats = load_player_stats()
+player_data, defense_data, matchups = load_csv_data()
 
 # -------------------------
-# SMART PROJECTIONS ENGINE
+# OPTIONAL LIVE UPDATE (SAFE)
+# -------------------------
+def try_live_update():
+    try:
+        from nba_api.stats.endpoints import leaguedashplayerstats
+
+        df = leaguedashplayerstats.LeagueDashPlayerStats(
+            season='2025-26',
+            per_mode_detailed='PerGame',
+            timeout=5
+        ).get_data_frames()[0]
+
+        return df
+
+    except:
+        return None
+
+live_data = try_live_update()
+
+# -------------------------
+# NORMALIZE NAMES
+# -------------------------
+def normalize_name(name):
+    return str(name).lower().replace(".", "").strip()
+
+player_data["clean_name"] = player_data["player"].apply(normalize_name)
+
+# -------------------------
+# SMART PROJECTION MODEL
+# -------------------------
+def calculate_projection(pdata, stat):
+    try:
+        minutes = pdata["minutes"]
+        trend = pdata["minutes_trend"]
+
+        minute_factor = max(0.8, min(1.2, trend))
+
+        usage_proxy = (pdata["avg_pts"] + pdata["avg_ast"]) / max(minutes, 1)
+        usage_factor = max(0.85, min(1.15, usage_proxy / 1.5))
+
+        efficiency_factor = 1 + ((pdata["fg_pct"] - 0.45) * 0.3)
+
+        if stat == "Points":
+            base = (
+                0.4 * pdata["last5_pts"] +
+                0.4 * pdata["last10_pts"] +
+                0.2 * pdata["avg_pts"]
+            )
+            projection = base * minute_factor * usage_factor * efficiency_factor
+            std = max(pdata["std_dev"], 1)
+
+        elif stat == "Rebounds":
+            base = pdata["avg_reb"]
+            projection = base * minute_factor
+            std = max(pdata.get("reb_std", 2), 1)
+
+        elif stat == "Assists":
+            base = pdata["avg_ast"]
+            projection = base * usage_factor
+            std = max(pdata.get("ast_std", 2), 1)
+
+        else:
+            return None, None
+
+        return projection, std
+
+    except:
+        return None, None
+
+# -------------------------
+# BUILD PROPS TABLE
 # -------------------------
 rows = []
 
-for _, p in player_stats.iterrows():
-    try:
-        name = p["PLAYER_NAME"]
+for _, pdata in player_data.iterrows():
+    for stat in ["Points", "Rebounds", "Assists"]:
+        projection, std = calculate_projection(pdata, stat)
 
-        pts = p["PTS"]
-        reb = p["REB"]
-        ast = p["AST"]
-        minutes = p["MIN"]
-
-        # -------------------------
-        # 1. MINUTES ADJUSTMENT
-        # -------------------------
-        minute_factor = minutes / 30
-        minute_factor = max(0.8, min(1.2, minute_factor))  # cap extremes
-
-        # -------------------------
-        # 2. USAGE PROXY
-        # -------------------------
-        usage_proxy = (p["FGA"] + 0.5 * p["AST"]) / max(minutes, 1)
-        usage_factor = max(0.85, min(1.15, usage_proxy / 1.2))
-
-        # -------------------------
-        # 3. EFFICIENCY BOOST
-        # -------------------------
-        fg = p["FG_PCT"]
-        efficiency_factor = 1 + ((fg - 0.45) * 0.3)
-
-        # -------------------------
-        # FINAL PROJECTIONS
-        # -------------------------
-        projection_pts = pts * minute_factor * usage_factor * efficiency_factor
-        projection_reb = reb * minute_factor
-        projection_ast = ast * usage_factor
-
-        # -------------------------
-        # 4. SMART VOLATILITY
-        # -------------------------
-        volatility = max(0.15, min(0.35, (p["FGA"] / max(minutes,1)) * 0.5))
-
-        std_pts = max(projection_pts * volatility, 1)
-        std_reb = max(projection_reb * 0.30, 1)
-        std_ast = max(projection_ast * 0.30, 1)
+        if projection is None:
+            continue
 
         rows.append({
-            "player": name,
-            "stat": "Points",
-            "projection": round(projection_pts, 2),
-            "std": std_pts
+            "player": pdata["player"],
+            "stat": stat,
+            "projection": round(projection, 2),
+            "std": std
         })
-
-        rows.append({
-            "player": name,
-            "stat": "Rebounds",
-            "projection": round(projection_reb, 2),
-            "std": std_reb
-        })
-
-        rows.append({
-            "player": name,
-            "stat": "Assists",
-            "projection": round(projection_ast, 2),
-            "std": std_ast
-        })
-
-    except:
-        continue
 
 df = pd.DataFrame(rows)
 
@@ -126,13 +136,14 @@ def calculate_edge(row):
         edge = prob - IMPLIED_PROB
 
         return edge
+
     except:
         return None
 
 input_df["edge"] = input_df.apply(calculate_edge, axis=1)
 
 # -------------------------
-# FILTER + DISPLAY
+# DISPLAY
 # -------------------------
 st.subheader("🔥 Best Value Bets")
 
@@ -142,7 +153,7 @@ filtered = filtered.sort_values(by="edge", ascending=False)
 st.dataframe(filtered.head(25), use_container_width=True)
 
 # -------------------------
-# PLAYER DETAIL VIEW
+# PLAYER DETAIL
 # -------------------------
 st.subheader("🔍 Player Detail")
 
