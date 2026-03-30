@@ -1,29 +1,33 @@
-import pandas as pd
-from nba_api.stats.endpoints import leaguedashplayerstats
+name: Update NBA Data
 
-df = leaguedashplayerstats.LeagueDashPlayerStats(
-    season='2025-26',
-    per_mode_detailed='PerGame'
-).get_data_frames()[0]
+on:
+  schedule:
+    - cron: '0 15 * * *'
+  workflow_dispatch:
 
-players = []
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
 
-for _, p in df.iterrows():
-    players.append({
-        "player": p["PLAYER_NAME"],
-        "team": p["TEAM_ABBREVIATION"],
-        "position": "SG",
-        "minutes": p["MIN"],
-        "minutes_trend": 1.0,
-        "avg_pts": p["PTS"],
-        "avg_reb": p["REB"],
-        "avg_ast": p["AST"],
-        "last5_pts": p["PTS"],
-        "last10_pts": p["PTS"],
-        "fg_pct": p["FG_PCT"],
-        "std_dev": max(p["PTS"] * 0.25, 1),
-        "reb_std": max(p["REB"] * 0.3, 1),
-        "ast_std": max(p["AST"] * 0.3, 1),
-    })
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-pd.DataFrame(players).to_csv("data/player_stats.csv", index=False)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install pandas nba_api
+
+      - name: Run script
+        run: python update_data.py
+
+      - name: Commit updated data
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@github.com"
+          git add data/player_stats.csv data/matchups.csv
+          git commit -m "auto update data" || echo "No changes"
+          git push
