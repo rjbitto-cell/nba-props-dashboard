@@ -11,6 +11,10 @@ def load_player_data():
 def load_defense_data():
     return pd.read_csv("data/team_defense.csv")
 
+@st.cache_data
+def load_matchups():
+    return pd.read_csv("data/matchups.csv")
+
 st.set_page_config(page_title="NBA Props Dashboard", layout="wide")
 
 st.title("🏀 NBA Props Dashboard")
@@ -111,24 +115,58 @@ import numpy as np
 
 player_data = load_player_data()
 defense_data = load_defense_data()
+matchups = load_matchups()
 
 def calculate_edge(row):
     try:
-        # Simulated realistic stats (stable for deployment)
-        avg_pts = row['line'] + np.random.uniform(-5, 5)
-        std = np.random.uniform(4, 8)
+        # ------------------------
+        # 🧠 PLAYER DATA
+        # ------------------------
+        pdata = player_data[player_data['player'] == row['player']]
 
-        # Simulated minutes + usage effect
-        minutes = np.random.uniform(28, 38)
-        usage = np.random.uniform(20, 35)
+        if pdata.empty:
+            return row['line'], 0
 
-        # Projection formula
-        projection = avg_pts * (minutes / 32) * (usage / 25)
+        pdata = pdata.iloc[0]
 
-        # Probability of hitting over
+        projection = (
+            0.4 * pdata['last5_pts'] +
+            0.4 * pdata['last10_pts'] +
+            0.2 * pdata['avg_pts']
+        )
+
+        # ------------------------
+        # 🔥 MATCHUP (REAL)
+        # ------------------------
+        match = matchups[matchups['player'] == row['player']]
+
+        if not match.empty:
+            opponent = match.iloc[0]['opponent']
+        else:
+            opponent = None
+
+        # ------------------------
+        # 🛡️ DEFENSE ADJUSTMENT
+        # ------------------------
+        def_row = defense_data[defense_data['team'] == opponent]
+
+        if not def_row.empty:
+            def_rating = def_row.iloc[0]['def_rating']
+            league_avg = defense_data['def_rating'].mean()
+
+            matchup_boost = league_avg / def_rating
+            projection *= matchup_boost
+
+        # ------------------------
+        # 📊 VOLATILITY
+        # ------------------------
+        std = pdata['std_dev']
+
+        # ------------------------
+        # 💰 EDGE CALC
+        # ------------------------
         prob = 1 - norm.cdf(row['line'], projection, std)
 
-        # Convert odds to implied probability
         odds = row.get('odds', -110)
         if odds > 0:
             implied = 100 / (odds + 100)
