@@ -1,99 +1,54 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from scipy.stats import norm
-from nba_api.stats.endpoints import playergamelog
-from nba_api.stats.static import players
+from nba_api.stats.endpoints import leaguedashplayerstats
 
 st.set_page_config(page_title="NBA Sharp Props Tool", layout="wide")
 st.title("🏀 NBA Sharp Props Tool")
 
-# -------------------------
-# SETTINGS
-# -------------------------
-SEASON = "2025-26"
 IMPLIED_PROB = 0.524
 
 # -------------------------
-# HELPERS
+# LOAD FAST NBA DATA (ONE CALL)
 # -------------------------
-def get_player_id(name):
-    p = players.find_players_by_full_name(name)
-    return p[0]['id'] if p else None
-
-@st.cache_data(ttl=3600)
-def get_active_players():
-    return players.get_active_players()
-
 @st.cache_data(ttl=600)
-def get_logs(player_id):
-    df = playergamelog.PlayerGameLog(player_id=player_id, season=SEASON).get_data_frames()[0]
+def load_player_stats():
+    df = leaguedashplayerstats.LeagueDashPlayerStats(
+        season='2025-26',
+        per_mode_detailed='PerGame'
+    ).get_data_frames()[0]
     return df
-
-def calculate_projection(logs):
-    if len(logs) < 5:
-        return None
-
-    last5 = logs.head(5)
-    last10 = logs.head(10)
-
-    # Base stats
-    pts = 0.4*last5['PTS'].mean() + 0.4*last10['PTS'].mean() + 0.2*logs['PTS'].mean()
-    reb = 0.4*last5['REB'].mean() + 0.4*last10['REB'].mean() + 0.2*logs['REB'].mean()
-    ast = 0.4*last5['AST'].mean() + 0.4*last10['AST'].mean() + 0.2*logs['AST'].mean()
-
-    # Minutes trend (usage proxy)
-    minutes_avg = logs['MIN'].mean()
-    minutes_recent = last5['MIN'].mean()
-    trend = minutes_recent / max(minutes_avg, 1)
-
-    pts *= trend
-    reb *= trend
-    ast *= trend
-
-    # Std dev for probability calc
-    std_pts = max(last10['PTS'].std(), 1)
-    std_reb = max(last10['REB'].std(), 1)
-    std_ast = max(last10['AST'].std(), 1)
-
-    return {
-        "PTS": (pts, std_pts),
-        "REB": (reb, std_reb),
-        "AST": (ast, std_ast)
-    }
-
-# -------------------------
-# LOAD PLAYERS
-# -------------------------
-players_list = get_active_players()
-
-# Limit for performance (you can increase later)
-players_list = players_list[:50]
-
-rows = []
 
 st.subheader("📊 Generating projections...")
 
-for p in players_list:
+player_stats = load_player_stats()
+
+# -------------------------
+# BUILD PROJECTIONS (FAST)
+# -------------------------
+rows = []
+
+for _, p in player_stats.iterrows():
     try:
-        name = p['full_name']
-        pid = p['id']
+        name = p["PLAYER_NAME"]
 
-        logs = get_logs(pid)
+        pts = p["PTS"]
+        reb = p["REB"]
+        ast = p["AST"]
 
-        proj = calculate_projection(logs)
-        if not proj:
-            continue
+        # Simple base projections (fast)
+        projection_pts = pts
+        projection_reb = reb
+        projection_ast = ast
 
-        for stat in ["PTS", "REB", "AST"]:
-            projection, std = proj[stat]
+        # Std dev approximation (important for edge calc)
+        std_pts = max(pts * 0.25, 1)
+        std_reb = max(reb * 0.30, 1)
+        std_ast = max(ast * 0.30, 1)
 
-            rows.append({
-                "player": name,
-                "stat": stat,
-                "projection": round(projection, 2),
-                "std": std
-            })
+        rows.append({"player": name, "stat": "Points", "projection": round(projection_pts, 2), "std": std_pts})
+        rows.append({"player": name, "stat": "Rebounds", "projection": round(projection_reb, 2), "std": std_reb})
+        rows.append({"player": name, "stat": "Assists", "projection": round(projection_ast, 2), "std": std_ast})
 
     except:
         continue
@@ -142,15 +97,14 @@ filtered = filtered.sort_values(by="edge", ascending=False)
 st.dataframe(filtered.head(25), use_container_width=True)
 
 # -------------------------
-# PLAYER VIEW
+# PLAYER DETAIL
 # -------------------------
 st.subheader("🔍 Player Detail")
 
-player = st.selectbox("Select Player", filtered["player"].unique() if not filtered.empty else [])
-
-if player:
+if not filtered.empty:
+    player = st.selectbox("Select Player", filtered["player"].unique())
     row = filtered[filtered["player"] == player].iloc[0]
 
     st.metric("Projection", row["projection"])
     st.metric("Line", row["line"])
-    st.metric("Edge", f"{round(row['edge']*100,2)}%")
+    st.metric("Edge", f"{round(row['edge'] * 100, 2)}%")
