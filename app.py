@@ -7,6 +7,10 @@ import requests
 def load_player_data():
     return pd.read_csv("data/player_stats.csv")
 
+@st.cache_data
+def load_defense_data():
+    return pd.read_csv("data/team_defense.csv")
+
 st.set_page_config(page_title="NBA Props Dashboard", layout="wide")
 
 st.title("🏀 NBA Props Dashboard")
@@ -106,6 +110,7 @@ from scipy.stats import norm
 import numpy as np
 
 player_data = load_player_data()
+defense_data = load_defense_data()
 
 def calculate_edge(row):
     try:
