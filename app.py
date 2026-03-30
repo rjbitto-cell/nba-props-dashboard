@@ -2,28 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+from scipy.stats import norm
 
-import requests
+st.set_page_config(page_title="NBA Props Dashboard", layout="wide")
+st.title("🏀 NBA Props Dashboard")
 
-@st.cache_data(ttl=300)
-def load_real_props():
-    try:
-        API_KEY = st.secrets.get("ODDS_API_KEY", None)
-
-        if API_KEY is None:
-            return None
-
-        url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=player_points"
-
-        response = requests.get(url, timeout=10)
-        data = response.json()
-
-        return data
-
-    except:
-        return None
-
-
+# -------------------------
+# LOAD STATIC DATA
+# -------------------------
 @st.cache_data
 def load_player_data():
     return pd.read_csv("data/player_stats.csv")
@@ -36,84 +22,70 @@ def load_defense_data():
 def load_matchups():
     return pd.read_csv("data/matchups.csv")
 
-st.set_page_config(page_title="NBA Props Dashboard", layout="wide")
-
-st.title("🏀 NBA Props Dashboard")
-
-# -----------------------------------
-# LOAD DATA (API or fallback)
-# -----------------------------------
-
-df = load_props()
-
-# -----------------------------------
-# SIMPLE PROJECTION MODEL (TEMP)
-# -----------------------------------
-from nba_api.stats.endpoints import playergamelog
-from nba_api.stats.static import players
-from scipy.stats import norm
-
-@st.cache_data(ttl=3600)
-def get_player_logs(player_name):
-    try:
-        player_id = players.find_players_by_full_name(player_name)[0]['id']
-        logs = playergamelog.PlayerGameLog(player_id=player_id)
-        df = logs.get_data_frames()[0]
-        return df
-    except:
-        return None
-
-
-from nba_api.stats.endpoints import playergamelog, leaguedashteamstats
-from nba_api.stats.static import players
-from scipy.stats import norm
-import pandas as pd
-import numpy as np
-
-@st.cache_data(ttl=3600)
-def get_player_logs(player_name):
-    try:
-        player_id = players.find_players_by_full_name(player_name)[0]['id']
-        logs = playergamelog.PlayerGameLog(player_id=player_id)
-        df = logs.get_data_frames()[0]
-        return df
-    except:
-        return None
-
-
-@st.cache_data(ttl=3600)
-def get_team_defense():
-    stats = leaguedashteamstats.LeagueDashTeamStats()
-    df = stats.get_data_frames()[0]
-    return df[['TEAM_NAME', 'DEF_RATING']]
-
-
-def extract_opponent(matchup):
-    try:
-        return matchup.split("vs. ")[-1] if "vs." in matchup else matchup.split("@ ")[-1]
-    except:
-        return None
-
-
-from scipy.stats import norm
-import numpy as np
-
 player_data = load_player_data()
 defense_data = load_defense_data()
 matchups = load_matchups()
 
-real_data = load_real_props()
+# -------------------------
+# LOAD PROPS (REAL API)
+# -------------------------
+@st.cache_data(ttl=300)
+def load_props():
+    try:
+        API_KEY = st.secrets.get("ODDS_API_KEY", "")
 
-if real_data:
-    st.write("Using REAL data ✅")
-else:
-    st.write("Using SAMPLE data ⚠️")
-    
+        if not API_KEY:
+            st.warning("No API key — using sample data")
+            return pd.DataFrame({
+                "player": ["LeBron James", "Stephen Curry", "Nikola Jokic"],
+                "stat": ["Points", "Points", "Rebounds"],
+                "line": [27.5, 29.5, 11.5],
+                "odds": [-110, -105, -120]
+            })
+
+        url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+        params = {
+            "apiKey": API_KEY,
+            "regions": "us",
+            "markets": "player_points"
+        }
+
+        res = requests.get(url, params=params, timeout=10).json()
+
+        rows = []
+
+        for game in res:
+            for book in game.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    if market.get("key") != "player_points":
+                        continue
+
+                    for o in market.get("outcomes", []):
+                        rows.append({
+                            "player": o.get("description"),
+                            "line": o.get("point"),
+                            "odds": o.get("price"),
+                            "stat": "Points"
+                        })
+
+        df = pd.DataFrame(rows)
+
+        if df.empty:
+            st.warning("No props returned from API")
+
+        return df
+
+    except:
+        st.error("API failed — using fallback")
+        return pd.DataFrame()
+
+df = load_props()
+
+# -------------------------
+# EDGE MODEL
+# -------------------------
 def calculate_edge(row):
     try:
-        # ------------------------
-        # 🧠 PLAYER DATA
-        # ------------------------
         pdata = player_data[player_data['player'] == row['player']]
 
         if pdata.empty:
@@ -121,72 +93,47 @@ def calculate_edge(row):
 
         pdata = pdata.iloc[0]
 
-        # ------------------------
-        # 🔥 BASE PROJECTION
-        # ------------------------
-        base_projection = (
+        # Base projection
+        base = (
             0.4 * pdata['last5_pts'] +
             0.4 * pdata['last10_pts'] +
             0.2 * pdata['avg_pts']
         )
 
-        # ------------------------
-        # 🔥 MINUTES MODEL
-        # ------------------------
+        # Minutes model
         minutes = pdata['minutes']
         trend = pdata['minutes_trend']
+        adj_minutes = minutes * trend
 
-        adjusted_minutes = minutes * trend
+        ppm = base / minutes
+        projection = ppm * adj_minutes
 
-        ppm = base_projection / minutes
-        projection = ppm * adjusted_minutes
-
-        # ------------------------
-        # 🔥 MATCHUP
-        # ------------------------
+        # Matchup
         match = matchups[matchups['player'] == row['player']]
+        opponent = match.iloc[0]['opponent'] if not match.empty else None
 
-        if not match.empty:
-            opponent = match.iloc[0]['opponent']
-        else:
-            opponent = None
-
-        # ------------------------
-        # 🛡️ DvP
-        # ------------------------
-        position = pdata['position']
-
+        # DvP
         def_row = defense_data[
             (defense_data['team'] == opponent) &
-            (defense_data['position'] == position)
+            (defense_data['position'] == pdata['position'])
         ]
 
         if not def_row.empty:
             def_rating = def_row.iloc[0]['def_rating']
             league_avg = defense_data['def_rating'].mean()
+            projection *= (league_avg / def_rating)
 
-            matchup_boost = league_avg / def_rating
-            projection *= matchup_boost
-
-        # ------------------------
-        # 📊 VOLATILITY
-        # ------------------------
+        # Variance
         std = pdata['std_dev']
 
-        # ------------------------
-        # 💰 EDGE CALC
-        # ------------------------
+        # Edge
         edge_multiplier = 1.15
+        adj_projection = projection * edge_multiplier
 
-        adjusted_projection = projection * edge_multiplier
-
-        prob = 1 - norm.cdf(row['line'], adjusted_projection, std)
+        prob = 1 - norm.cdf(row['line'], adj_projection, std)
 
         odds = row.get('odds', -110)
-        if odds > 0:
-            implied = 100 / (odds + 100)
-        else:
-            implied = -odds / (-odds + 100)
+        implied = (100 / (odds + 100)) if odds > 0 else (-odds / (-odds + 100))
 
         edge = prob - implied
 
@@ -195,29 +142,30 @@ def calculate_edge(row):
     except:
         return row['line'], 0
 
-df[['projection', 'edge']] = df.apply(
-    lambda row: pd.Series(calculate_edge(row)),
-    axis=1
-)
+# -------------------------
+# APPLY MODEL
+# -------------------------
+if not df.empty:
+    df[['projection', 'edge']] = df.apply(
+        lambda row: pd.Series(calculate_edge(row)), axis=1
+    )
 
-df = df.sort_values("edge", ascending=False)
+    df = df.sort_values(by='edge', ascending=False)
 
-# -----------------------------------
-# DISPLAY
-# -----------------------------------
+# -------------------------
+# UI
+# -------------------------
 st.subheader("🔥 Best Bets")
 
-st.dataframe(df, use_container_width=True)
+if not df.empty:
+    st.dataframe(df.head(15), use_container_width=True)
 
-# -----------------------------------
-# PLAYER VIEW
-# -----------------------------------
-player = st.selectbox("Select Player", df["player"].unique())
+    player = st.selectbox("Select Player", df['player'].unique())
+    row = df[df['player'] == player].iloc[0]
 
-row = df[df["player"] == player].iloc[0]
+    st.metric("Projection", round(row['projection'], 2))
+    st.metric("Line", row['line'])
+    st.metric("Edge", f"{round(row['edge']*100,2)}%")
 
-col1, col2, col3 = st.columns(3)
-
-col1.metric("Projection", round(row["projection"], 2))
-col2.metric("Line", row["line"])
-col3.metric("Edge", f"{row['edge']:.2%}")
+else:
+    st.warning("No data available")
