@@ -14,11 +14,7 @@ MAX_GAMES = 10
 # -------------------------
 # API KEY
 # -------------------------
-try:
-    ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
-except:
-    st.error("Missing ODDS_API_KEY in secrets")
-    st.stop()
+ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 
 # -------------------------
 # STATE
@@ -32,10 +28,10 @@ if "odds_data" not in st.session_state:
 def clean_name(name):
     name = str(name).lower()
     name = re.sub(r"[^a-z\s]", "", name)
-    return name.replace(" jr", "").replace(" sr", "").strip()
+    return name.strip()
 
 # -------------------------
-# LOAD PLAYER DATA
+# LOAD DATA
 # -------------------------
 @st.cache_data
 def load_players():
@@ -43,30 +39,23 @@ def load_players():
     df["clean_name"] = df["player"].apply(clean_name)
     return df
 
-player_data = load_players()
-
-# -------------------------
-# LOAD TEAM DEFENSE
-# -------------------------
 @st.cache_data
-def load_team_defense():
+def load_team_def():
     df = pd.read_csv("data/team_defense.csv")
     df.columns = [c.lower() for c in df.columns]
     return df
 
-team_def = load_team_defense()
+players = load_players()
+team_def = load_team_def()
 
 # -------------------------
 # BUILD DVP
 # -------------------------
 def build_dvp(df):
-    pts = next((c for c in df.columns if "pts" in c), None)
-    reb = next((c for c in df.columns if "reb" in c), None)
-    ast = next((c for c in df.columns if "ast" in c), None)
-    team = next((c for c in df.columns if "team" in c), None)
-
-    if not all([pts, reb, ast, team]):
-        return {}
+    pts = [c for c in df.columns if "pts" in c][0]
+    reb = [c for c in df.columns if "reb" in c][0]
+    ast = [c for c in df.columns if "ast" in c][0]
+    team = [c for c in df.columns if "team" in c][0]
 
     avg_pts = df[pts].mean()
     avg_reb = df[reb].mean()
@@ -84,98 +73,59 @@ def build_dvp(df):
 DVP = build_dvp(team_def)
 
 # -------------------------
-# INJURIES
-# -------------------------
-@st.cache_data(ttl=1800)
-def load_injuries():
-    try:
-        url = "https://site.web.api.espn.com/apis/v2/sports/basketball/nba/injuries"
-        data = requests.get(url, timeout=10).json()
-
-        out = {}
-        for t in data.get("teams", []):
-            abbr = t.get("team", {}).get("abbreviation")
-
-            outs = [
-                p.get("athlete", {}).get("displayName")
-                for p in t.get("injuries", [])
-                if "out" in str(p.get("status", "")).lower()
-            ]
-
-            if outs:
-                out[abbr] = {"OUT": outs, "BOOST": min(0.2, 0.05 * len(outs))}
-        return out
-    except:
-        return {}
-
-injuries = load_injuries()
-
-# -------------------------
-# LOAD MATCHUPS (AUTO)
+# MATCHUPS (AUTO)
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_matchups():
     url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
-    res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+    res = requests.get(url, params={"apiKey": ODDS_API_KEY}).json()
 
     m = {}
-    if res.status_code != 200:
-        return m
-
-    for e in res.json()[:MAX_GAMES]:
-        home = e.get("home_team")
-        away = e.get("away_team")
-
-        m[home] = away
-        m[away] = home
-
+    for e in res[:MAX_GAMES]:
+        m[e["home_team"]] = e["away_team"]
+        m[e["away_team"]] = e["home_team"]
     return m
 
 MATCHUPS = load_matchups()
 
 # -------------------------
-# PROJECTION MODEL
+# PROJECTION MODEL (FIXED)
 # -------------------------
 def project(p, stat):
     try:
         team = p["team"]
         opp = MATCHUPS.get(team)
 
-        minutes = p["minutes"]
-        trend = p["minutes_trend"]
-
-        minute_factor = max(0.85, min(1.25, trend))
-        usage_factor = (p["avg_pts"] + p["avg_ast"]) / max(minutes, 1)
-        efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.25)
-
-        usage_spike = (p["last5_pts"] - p["avg_pts"]) / max(p["avg_pts"], 1)
-        usage_boost = 1.08 if usage_spike > 0.1 else 1.04 if usage_spike > 0.05 else 1.0
-
-        injury_boost = 1.0
-        if team in injuries:
-            injury_boost += injuries[team]["BOOST"]
-
-        dvp_boost = 1.0
-        if opp in DVP:
-            dvp_boost = DVP[opp].get(stat, 1.0)
-
+        # BASELINE (REGRESSION)
         if stat == "Points":
-            base = 0.5*p["last5_pts"] + 0.3*p["last10_pts"] + 0.2*p["avg_pts"]
+            base = 0.4*p["last5_pts"] + 0.3*p["last10_pts"] + 0.3*p["avg_pts"]
             std = max(p["std_dev"], 1)
-            proj = base * minute_factor * efficiency * usage_boost * injury_boost * dvp_boost
 
         elif stat == "Rebounds":
             base = p["avg_reb"]
             std = max(p["reb_std"], 1)
-            proj = base * minute_factor * injury_boost * dvp_boost
 
         elif stat == "Assists":
             base = p["avg_ast"]
             std = max(p["ast_std"], 1)
-            proj = base * usage_factor * usage_boost * injury_boost * dvp_boost
 
         else:
             return None, None
+
+        # MINUTES (CAPPED)
+        minute_boost = max(0.9, min(1.1, p["minutes_trend"]))
+
+        # USAGE (CAPPED)
+        usage_spike = (p["last5_pts"] - p["avg_pts"]) / max(p["avg_pts"], 1)
+        usage_boost = 1.05 if usage_spike > 0.08 else 1.0
+
+        # DVP (CAPPED)
+        dvp_boost = 1.0
+        if opp in DVP:
+            dvp_boost = max(0.9, min(1.1, DVP[opp].get(stat, 1.0)))
+
+        # FINAL (CONTROLLED)
+        proj = base * minute_boost * usage_boost * dvp_boost
 
         return proj, std
 
@@ -186,7 +136,7 @@ def project(p, stat):
 # BUILD PROJECTIONS
 # -------------------------
 proj_rows = []
-for _, p in player_data.iterrows():
+for _, p in players.iterrows():
     for stat in ["Points","Rebounds","Assists"]:
         proj, std = project(p, stat)
         if proj:
@@ -201,20 +151,18 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(proj_rows)
 
 # -------------------------
-# LOAD ODDS
+# LOAD ODDS + TRACK HISTORY
 # -------------------------
-@st.cache_data(ttl=1800)
 def load_odds():
     rows = []
 
     events = requests.get(
         "https://api.the-odds-api.com/v4/sports/basketball_nba/events",
-        params={"apiKey": ODDS_API_KEY},
-        timeout=10
+        params={"apiKey": ODDS_API_KEY}
     ).json()
 
     for e in events[:MAX_GAMES]:
-        event_id = e.get("id")
+        event_id = e["id"]
 
         res = requests.get(
             f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds",
@@ -222,8 +170,7 @@ def load_odds():
                 "apiKey": ODDS_API_KEY,
                 "regions": "us",
                 "markets": "player_points,player_rebounds,player_assists"
-            },
-            timeout=10
+            }
         )
 
         if res.status_code != 200:
@@ -250,8 +197,7 @@ def load_odds():
                         "player": o["description"],
                         "clean_name": clean_name(o["description"]),
                         "stat": stat,
-                        "line": float(o["point"]),
-                        "book": book["key"]
+                        "line": float(o["point"])
                     })
 
     return pd.DataFrame(rows)
@@ -260,39 +206,53 @@ def load_odds():
 # BUTTON
 # -------------------------
 if st.button("🔄 Load Odds"):
-    st.session_state.odds_data = load_odds()
+    new_odds = load_odds()
+
+    if not st.session_state.odds_data.empty:
+        old = st.session_state.odds_data
+
+        merged_move = new_odds.merge(
+            old,
+            on=["clean_name","stat"],
+            how="left",
+            suffixes=("", "_old")
+        )
+
+        merged_move["line_move"] = merged_move["line"] - merged_move["line_old"]
+
+        st.session_state.odds_data = merged_move
+    else:
+        new_odds["line_move"] = 0
+        st.session_state.odds_data = new_odds
 
 odds_df = st.session_state.odds_data
 
 # -------------------------
-# MERGE + EDGE
+# FINAL MERGE
 # -------------------------
 if not odds_df.empty:
 
     best = odds_df.sort_values("line").groupby(["clean_name","stat"]).first().reset_index()
-    best = best.rename(columns={"line":"best_line"})
 
-    merged = proj_df.merge(best, on=["clean_name","stat"], how="inner")
+    merged = proj_df.merge(best, on=["clean_name","stat"])
 
-    # ✅ FIX PLAYER COLUMN
     if "player_x" in merged.columns:
         merged["player"] = merged["player_x"]
 
     merged["edge"] = merged.apply(
-        lambda r: (1 - norm.cdf(r["best_line"], r["projection"], r["std"])) - IMPLIED_PROB,
+        lambda r: (1 - norm.cdf(r["line"], r["projection"], r["std"])) - IMPLIED_PROB,
         axis=1
     )
 
-    merged = merged[merged["edge"] > 0.005]
-    merged = merged.sort_values("edge", ascending=False)
+    # STEAM SIGNAL
+    merged["steam"] = merged["line_move"].apply(
+        lambda x: "🔥 OVER STEAM" if x > 0.5 else "❄️ UNDER STEAM" if x < -0.5 else ""
+    )
 
-    st.write("Props found:", len(merged))
-    st.write("Columns:", merged.columns.tolist())
-
-    safe_cols = [c for c in ["player","stat","best_line","projection","edge"] if c in merged.columns]
+    merged = merged.sort_values(["edge","line_move"], ascending=False)
 
     st.dataframe(
-        merged[safe_cols].head(25),
+        merged[["player","stat","line","projection","edge","line_move","steam"]].head(25),
         use_container_width=True
     )
 
