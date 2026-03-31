@@ -11,9 +11,6 @@ IMPLIED_PROB = 0.524
 VALID_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
 MAX_GAMES = 10
 
-# -------------------------
-# API KEY
-# -------------------------
 ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 
 # -------------------------
@@ -23,7 +20,7 @@ if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
 
 # -------------------------
-# CLEAN NAMES
+# CLEAN NAME
 # -------------------------
 def clean_name(name):
     name = str(name).lower()
@@ -73,17 +70,21 @@ def build_dvp(df):
 DVP = build_dvp(team_def)
 
 # -------------------------
-# MATCHUPS (AUTO)
+# MATCHUPS
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_matchups():
     url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
-    res = requests.get(url, params={"apiKey": ODDS_API_KEY}).json()
+    res = requests.get(url, params={"apiKey": ODDS_API_KEY})
 
     m = {}
-    for e in res[:MAX_GAMES]:
+    if res.status_code != 200:
+        return m
+
+    for e in res.json()[:MAX_GAMES]:
         m[e["home_team"]] = e["away_team"]
         m[e["away_team"]] = e["home_team"]
+
     return m
 
 MATCHUPS = load_matchups()
@@ -96,7 +97,6 @@ def project(p, stat):
         team = p["team"]
         opp = MATCHUPS.get(team)
 
-        # BASELINE (REGRESSION)
         if stat == "Points":
             base = 0.4*p["last5_pts"] + 0.3*p["last10_pts"] + 0.3*p["avg_pts"]
             std = max(p["std_dev"], 1)
@@ -112,19 +112,15 @@ def project(p, stat):
         else:
             return None, None
 
-        # MINUTES (CAPPED)
         minute_boost = max(0.9, min(1.1, p["minutes_trend"]))
 
-        # USAGE (CAPPED)
         usage_spike = (p["last5_pts"] - p["avg_pts"]) / max(p["avg_pts"], 1)
         usage_boost = 1.05 if usage_spike > 0.08 else 1.0
 
-        # DVP (CAPPED)
         dvp_boost = 1.0
         if opp in DVP:
             dvp_boost = max(0.9, min(1.1, DVP[opp].get(stat, 1.0)))
 
-        # FINAL (CONTROLLED)
         proj = base * minute_boost * usage_boost * dvp_boost
 
         return proj, std
@@ -151,7 +147,7 @@ for _, p in players.iterrows():
 proj_df = pd.DataFrame(proj_rows)
 
 # -------------------------
-# LOAD ODDS + TRACK HISTORY
+# LOAD ODDS
 # -------------------------
 def load_odds():
     rows = []
@@ -208,21 +204,23 @@ def load_odds():
 if st.button("🔄 Load Odds"):
     new_odds = load_odds()
 
+    # ALWAYS CREATE line_move
+    new_odds["line_move"] = 0
+
     if not st.session_state.odds_data.empty:
         old = st.session_state.odds_data
 
-        merged_move = new_odds.merge(
-            old,
+        merged = new_odds.merge(
+            old[["clean_name","stat","line"]],
             on=["clean_name","stat"],
             how="left",
             suffixes=("", "_old")
         )
 
-        merged_move["line_move"] = merged_move["line"] - merged_move["line_old"]
+        merged["line_move"] = merged["line"] - merged["line_old"].fillna(merged["line"])
+        st.session_state.odds_data = merged
 
-        st.session_state.odds_data = merged_move
     else:
-        new_odds["line_move"] = 0
         st.session_state.odds_data = new_odds
 
 odds_df = st.session_state.odds_data
@@ -239,14 +237,17 @@ if not odds_df.empty:
     if "player_x" in merged.columns:
         merged["player"] = merged["player_x"]
 
+    # SAFETY: ensure line_move exists
+    if "line_move" not in merged.columns:
+        merged["line_move"] = 0
+
     merged["edge"] = merged.apply(
         lambda r: (1 - norm.cdf(r["line"], r["projection"], r["std"])) - IMPLIED_PROB,
         axis=1
     )
 
-    # STEAM SIGNAL
     merged["steam"] = merged["line_move"].apply(
-        lambda x: "🔥 OVER STEAM" if x > 0.5 else "❄️ UNDER STEAM" if x < -0.5 else ""
+        lambda x: "🔥 OVER" if x > 0.5 else "❄️ UNDER" if x < -0.5 else ""
     )
 
     merged = merged.sort_values(["edge","line_move"], ascending=False)
