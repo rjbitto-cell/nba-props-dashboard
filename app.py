@@ -9,9 +9,10 @@ st.title("🏀 NBA Sharp Props Tool")
 
 IMPLIED_PROB = 0.524
 VALID_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
+MAX_GAMES = 4  # limit API usage
 
 # -------------------------
-# LOAD API KEY
+# API KEY
 # -------------------------
 try:
     ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
@@ -20,7 +21,13 @@ except:
     st.stop()
 
 # -------------------------
-# NAME NORMALIZATION (KEY FIX)
+# SESSION STATE (KEY FEATURE)
+# -------------------------
+if "odds_data" not in st.session_state:
+    st.session_state.odds_data = pd.DataFrame()
+
+# -------------------------
+# NAME CLEANING
 # -------------------------
 def clean_name(name):
     name = str(name).lower()
@@ -29,19 +36,17 @@ def clean_name(name):
     return name.strip()
 
 # -------------------------
-# LOAD DATA
+# LOAD PLAYER DATA
 # -------------------------
 @st.cache_data
 def load_data():
     try:
         df = pd.read_csv("data/player_stats.csv")
-        if df.empty:
-            raise ValueError
         return df
     except:
-        st.warning("Using fallback data")
         return pd.DataFrame({
             "player": ["LeBron James", "Stephen Curry"],
+            "team": ["LAL", "GSW"],
             "minutes": [35, 34],
             "minutes_trend": [1.0, 1.0],
             "avg_pts": [27, 29],
@@ -109,29 +114,31 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# ODDS API (EVENT-BASED)
+# CACHE EVENTS (SAVES CALLS)
 # -------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
+def load_events():
+    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
+    res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+
+    if res.status_code != 200:
+        return []
+
+    return res.json()
+
+# -------------------------
+# LOAD ODDS (ON DEMAND)
+# -------------------------
+@st.cache_data(ttl=1800)
 def load_odds():
     try:
-        sport = "basketball_nba"
-
-        events_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
-        events_res = requests.get(events_url, params={"apiKey": ODDS_API_KEY}, timeout=10)
-
-        if events_res.status_code != 200:
-            st.error(f"Events API failed: {events_res.status_code}")
-            return pd.DataFrame()
-
-        events = events_res.json()
+        events = load_events()
         rows = []
 
-        for event in events:
+        for event in events[:MAX_GAMES]:
             event_id = event.get("id")
-            if not event_id:
-                continue
 
-            props_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
+            url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
 
             params = {
                 "apiKey": ODDS_API_KEY,
@@ -140,7 +147,7 @@ def load_odds():
                 "oddsFormat": "american"
             }
 
-            res = requests.get(props_url, params=params, timeout=10)
+            res = requests.get(url, params=params, timeout=10)
 
             if res.status_code != 200:
                 continue
@@ -148,9 +155,7 @@ def load_odds():
             data = res.json()
 
             for book in data.get("bookmakers", []):
-                book_name = book.get("key")
-
-                if book_name not in VALID_BOOKS:
+                if book.get("key") not in VALID_BOOKS:
                     continue
 
                 for market in book.get("markets", []):
@@ -176,46 +181,47 @@ def load_odds():
                             "clean_name": clean_name(player),
                             "stat": stat,
                             "line": float(line),
-                            "book": book_name
+                            "book": book.get("key")
                         })
 
         return pd.DataFrame(rows)
 
     except Exception as e:
-        st.error(f"Odds loading failed: {e}")
+        st.error(f"Odds load failed: {e}")
         return pd.DataFrame()
 
-odds_df = load_odds()
+# -------------------------
+# BUTTON (KEY FEATURE)
+# -------------------------
+if st.button("🔄 Load / Refresh Odds"):
+    with st.spinner("Fetching odds..."):
+        st.session_state.odds_data = load_odds()
 
 # -------------------------
-# BEST LINE
+# USE STORED DATA
 # -------------------------
+odds_df = st.session_state.odds_data
+
 def get_best_lines(df):
     if df.empty:
         return pd.DataFrame()
 
-    best = (
+    return (
         df.sort_values("line")
         .groupby(["clean_name", "stat"], as_index=False)
         .first()
         .rename(columns={"line": "best_line"})
     )
 
-    return best
-
 best_df = get_best_lines(odds_df)
 
 # -------------------------
 # MERGE
 # -------------------------
-merged = proj_df.merge(
-    best_df,
-    on=["clean_name", "stat"],
-    how="inner"
-)
+merged = proj_df.merge(best_df, on=["clean_name", "stat"], how="inner")
 
 # -------------------------
-# EDGE CALCULATION
+# EDGE
 # -------------------------
 def calculate_edge(row):
     try:
@@ -227,14 +233,10 @@ def calculate_edge(row):
 if not merged.empty:
     merged["edge"] = merged.apply(calculate_edge, axis=1)
 
-# -------------------------
-# FILTER SHARP BETS
-# -------------------------
-if not merged.empty:
     merged = merged[
-        (merged["edge"] > 0.03) &     # +EV
-        (merged["edge"] < 0.15) &     # remove fake edges
-        (merged["projection"] > 5)    # avoid noise
+        (merged["edge"] > 0.03) &
+        (merged["edge"] < 0.15) &
+        (merged["projection"] > 5)
     ]
 
 # -------------------------
@@ -242,7 +244,9 @@ if not merged.empty:
 # -------------------------
 st.subheader("🔥 Sharp Bets")
 
-if merged.empty:
+if odds_df.empty:
+    st.info("Click 'Load / Refresh Odds' to fetch data")
+elif merged.empty:
     st.warning("No sharp bets found right now")
 else:
     merged = merged.sort_values("edge", ascending=False)
