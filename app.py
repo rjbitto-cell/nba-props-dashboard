@@ -11,10 +11,9 @@ st.title("🏀 NBA Sharp Props Tool")
 IMPLIED_PROB = 0.524
 VALID_BOOKS = ["draftkings","fanduel","betmgm","caesars"]
 MAX_GAMES = 10
+HIST_FILE = "data/odds_history.csv"
 
 ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
-
-HIST_FILE = "data/odds_history.csv"
 
 # -------------------------
 # CLEAN NAME
@@ -43,7 +42,7 @@ players = load_players()
 team_def = load_team_def()
 
 # -------------------------
-# DVP
+# BUILD DVP
 # -------------------------
 def build_dvp(df):
     pts = [c for c in df.columns if "pts" in c][0]
@@ -95,11 +94,7 @@ def project(p, stat):
         opp = MATCHUPS.get(team)
 
         if stat == "Points":
-            base = (
-                0.6*p["avg_pts"] +
-                0.25*p["last10_pts"] +
-                0.15*p["last5_pts"]
-            )
+            base = 0.6*p["avg_pts"] + 0.25*p["last10_pts"] + 0.15*p["last5_pts"]
             std = max(p["std_dev"],1)
 
         elif stat == "Rebounds":
@@ -201,12 +196,15 @@ def load_odds():
 if st.button("🔄 Load Odds"):
     new = load_odds()
 
-    # SAVE HISTORY
+    # SAVE HISTORY SAFELY
     if os.path.exists(HIST_FILE):
         hist = pd.read_csv(HIST_FILE)
-        combined = pd.concat([hist,new]).drop_duplicates()
+        combined = pd.concat([hist,new], ignore_index=True)
     else:
-        combined = new
+        combined = new.copy()
+
+    # DROP DUPLICATES CLEANLY
+    combined = combined.drop_duplicates(subset=["clean_name","stat","line","book"])
 
     combined.to_csv(HIST_FILE,index=False)
 
@@ -215,36 +213,58 @@ if st.button("🔄 Load Odds"):
 odds_df = st.session_state.get("odds_data", pd.DataFrame())
 
 # -------------------------
-# PROCESS
+# FINAL PROCESS
 # -------------------------
 if not odds_df.empty:
 
-    best = odds_df.sort_values("line").groupby(["clean_name","stat"]).first().reset_index()
+    best = odds_df.sort_values("line").groupby(["clean_name","stat"], as_index=False).first()
 
-    merged = proj_df.merge(best,on=["clean_name","stat"])
+    merged = proj_df.merge(best,on=["clean_name","stat"], how="inner")
 
     if "player_x" in merged.columns:
         merged["player"] = merged["player_x"]
 
-    # LOAD HISTORY
+    # -------------------------
+    # LOAD HISTORY SAFELY
+    # -------------------------
     if os.path.exists(HIST_FILE):
+
         hist = pd.read_csv(HIST_FILE)
 
-        first_lines = hist.sort_values("line").groupby(["clean_name","stat"]).first().reset_index()
-        first_lines = first_lines.rename(columns={"line":"open_line"})
+        # ONLY KEEP NEEDED COLUMNS
+        hist = hist[["clean_name","stat","line"]]
 
-        merged = merged.merge(first_lines,on=["clean_name","stat"],how="left")
+        # GET OPENING LINE
+        first_lines = (
+            hist.sort_values("line")
+            .drop_duplicates(subset=["clean_name","stat"], keep="first")
+            .rename(columns={"line":"open_line"})
+        )
+
+        # SAFE MERGE
+        merged = pd.merge(
+            merged,
+            first_lines,
+            on=["clean_name","stat"],
+            how="left"
+        )
 
         merged["line_move"] = merged["line"] - merged["open_line"]
 
     else:
         merged["line_move"] = 0
 
+    # -------------------------
+    # EDGE
+    # -------------------------
     merged["edge"] = merged.apply(
         lambda r: (1 - norm.cdf(r["line"],r["projection"],r["std"])) - IMPLIED_PROB,
         axis=1
     )
 
+    # -------------------------
+    # STEAM
+    # -------------------------
     merged["steam"] = merged["line_move"].apply(
         lambda x: "🔥 OVER" if x > 0.75 else "❄️ UNDER" if x < -0.75 else ""
     )
