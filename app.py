@@ -14,25 +14,21 @@ IMPLIED_PROB = 0.524
 try:
     ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 except:
-    st.error("Missing ODDS_API_KEY in Streamlit secrets")
+    st.error("❌ Missing ODDS_API_KEY in Streamlit secrets")
     st.stop()
 
 # -------------------------
-# LOAD DATA (SAFE)
+# LOAD PLAYER DATA
 # -------------------------
 @st.cache_data
 def load_data():
     try:
-        player_data = pd.read_csv("data/player_stats.csv")
-
-        if player_data.empty:
-            raise ValueError("Empty player data")
-
-        return player_data
-
-    except Exception as e:
-        st.warning(f"Using fallback data: {e}")
-
+        df = pd.read_csv("data/player_stats.csv")
+        if df.empty:
+            raise ValueError("Empty CSV")
+        return df
+    except:
+        st.warning("Using fallback data")
         return pd.DataFrame({
             "player": ["LeBron James", "Stephen Curry"],
             "minutes": [35, 34],
@@ -81,7 +77,6 @@ def project(p, stat):
             return None, None
 
         return proj, std
-
     except:
         return None, None
 
@@ -101,40 +96,50 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# ODDS API (FULLY SAFE)
+# ODDS API (EVENT-BASED FIX)
 # -------------------------
 @st.cache_data(ttl=300)
 def load_odds():
     try:
-        url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+        sport = "basketball_nba"
 
-        params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": "us",
-            "markets": "player_points,player_rebounds,player_assists",
-            "oddsFormat": "american"
-        }
+        # STEP 1: EVENTS
+        events_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
+        events_res = requests.get(events_url, params={"apiKey": ODDS_API_KEY}, timeout=10)
 
-        res = requests.get(url, params=params, timeout=10)
-
-        if res.status_code != 200:
-            st.error(f"Odds API HTTP Error: {res.status_code}")
+        if events_res.status_code != 200:
+            st.error(f"Events API failed: {events_res.status_code}")
             return pd.DataFrame(columns=["player","stat","line","book"])
 
-        data = res.json()
-
-        # Handle API error responses
-        if isinstance(data, dict):
-            st.error(f"Odds API Error: {data}")
-            return pd.DataFrame(columns=["player","stat","line","book"])
-
+        events = events_res.json()
         rows = []
 
-        for game in data:
-            if not isinstance(game, dict):
+        # STEP 2: LOOP EVENTS
+        for event in events:
+            event_id = event.get("id")
+            if not event_id:
                 continue
 
-            for book in game.get("bookmakers", []):
+            props_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
+
+            params = {
+                "apiKey": ODDS_API_KEY,
+                "regions": "us",
+                "markets": "player_points,player_rebounds,player_assists",
+                "oddsFormat": "american"
+            }
+
+            res = requests.get(props_url, params=params, timeout=10)
+
+            if res.status_code != 200:
+                continue
+
+            data = res.json()
+
+            if not isinstance(data, dict):
+                continue
+
+            for book in data.get("bookmakers", []):
                 book_name = book.get("key")
 
                 for market in book.get("markets", []):
@@ -165,13 +170,13 @@ def load_odds():
         df = pd.DataFrame(rows)
 
         if df.empty:
-            st.warning("No odds data found")
+            st.warning("No props found")
             return pd.DataFrame(columns=["player","stat","line","book"])
 
         return df
 
     except Exception as e:
-        st.error(f"Odds API failed: {e}")
+        st.error(f"Odds loading failed: {e}")
         return pd.DataFrame(columns=["player","stat","line","book"])
 
 odds_df = load_odds()
@@ -195,7 +200,7 @@ def get_best_lines(df):
 best_df = get_best_lines(odds_df)
 
 # -------------------------
-# MERGE SAFELY
+# MERGE
 # -------------------------
 if not proj_df.empty and not best_df.empty:
     merged = proj_df.merge(best_df, on=["player", "stat"], how="inner")
