@@ -21,7 +21,7 @@ except:
     st.stop()
 
 # -------------------------
-# SESSION STATE (prevents API spam)
+# SESSION STATE
 # -------------------------
 if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
@@ -47,17 +47,46 @@ def load_data():
 player_data = load_data()
 
 # -------------------------
-# INJURY BOOSTS (MANUAL FOR NOW)
+# AUTO INJURY FETCH (ESPN)
 # -------------------------
-INJURY_BOOSTS = {
-    "LAL": {"OUT": ["LeBron James"], "BOOST": 0.12},
-    "DAL": {"OUT": ["Luka Doncic"], "BOOST": 0.15},
-    "BOS": {"OUT": ["Jayson Tatum"], "BOOST": 0.10},
-    "MIL": {"OUT": ["Giannis Antetokounmpo"], "BOOST": 0.15},
-}
+@st.cache_data(ttl=1800)
+def load_injuries():
+    try:
+        url = "https://site.web.api.espn.com/apis/v2/sports/basketball/nba/injuries"
+        res = requests.get(url, timeout=10)
+        data = res.json()
+
+        injury_map = {}
+
+        for team in data.get("teams", []):
+            team_abbr = team.get("team", {}).get("abbreviation")
+            injuries = team.get("injuries", [])
+
+            out_players = []
+
+            for p in injuries:
+                status = str(p.get("status", "")).lower()
+                name = p.get("athlete", {}).get("displayName")
+
+                if "out" in status or "inactive" in status:
+                    out_players.append(name)
+
+            if out_players:
+                injury_map[team_abbr] = {
+                    "OUT": out_players,
+                    "BOOST": min(0.20, 0.05 * len(out_players))
+                }
+
+        return injury_map
+
+    except Exception as e:
+        st.warning(f"Injury fetch failed: {e}")
+        return {}
+
+injuries = load_injuries()
 
 # -------------------------
-# PROJECTION MODEL (UPGRADED)
+# PROJECTION MODEL
 # -------------------------
 def project(p, stat):
     try:
@@ -65,7 +94,6 @@ def project(p, stat):
         trend = p["minutes_trend"]
         team = p["team"]
 
-        # BASE FACTORS
         minute_factor = max(0.85, min(1.25, trend))
         usage_factor = (p["avg_pts"] + p["avg_ast"]) / max(minutes, 1)
         efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.25)
@@ -78,10 +106,10 @@ def project(p, stat):
         elif usage_spike > 0.05:
             usage_boost = 1.04
 
-        # INJURY BOOST
+        # INJURY BOOST (AUTO)
         injury_boost = 1.0
-        if team in INJURY_BOOSTS:
-            injury_boost += INJURY_BOOSTS[team]["BOOST"]
+        if team in injuries:
+            injury_boost += injuries[team]["BOOST"]
 
         # PROJECTIONS
         if stat == "Points":
@@ -193,7 +221,7 @@ def load_odds():
     return pd.DataFrame(rows)
 
 # -------------------------
-# BUTTON (manual API call)
+# BUTTON
 # -------------------------
 if st.button("🔄 Load / Refresh Odds"):
     with st.spinner("Fetching odds..."):
@@ -202,7 +230,7 @@ if st.button("🔄 Load / Refresh Odds"):
 odds_df = st.session_state.odds_data
 
 # -------------------------
-# BEST LINES
+# BEST LINES + RANGE
 # -------------------------
 def get_best_lines(df):
     if df.empty:
@@ -252,8 +280,7 @@ def tier(e):
 if not merged.empty:
     merged["edge"] = merged.apply(calc_edge, axis=1)
     merged["edge_tier"] = merged["edge"].apply(tier)
-
-    merged = merged[(merged["edge"] > 0.005)]
+    merged = merged[merged["edge"] > 0.005]
     merged = merged.sort_values(["edge", "line_diff"], ascending=False)
 
 # -------------------------
@@ -261,6 +288,12 @@ if not merged.empty:
 # -------------------------
 st.write("Props found:", len(merged))
 st.write("Columns:", merged.columns.tolist())
+
+# -------------------------
+# OPTIONAL: INJURY DISPLAY
+# -------------------------
+with st.expander("🚑 Injury Report"):
+    st.write(injuries)
 
 # -------------------------
 # DISPLAY
