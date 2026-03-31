@@ -21,7 +21,7 @@ except:
     st.stop()
 
 # -------------------------
-# SESSION STATE
+# SESSION STATE (prevents API spam)
 # -------------------------
 if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
@@ -47,39 +47,69 @@ def load_data():
 player_data = load_data()
 
 # -------------------------
-# PROJECTIONS
+# INJURY BOOSTS (MANUAL FOR NOW)
+# -------------------------
+INJURY_BOOSTS = {
+    "LAL": {"OUT": ["LeBron James"], "BOOST": 0.12},
+    "DAL": {"OUT": ["Luka Doncic"], "BOOST": 0.15},
+    "BOS": {"OUT": ["Jayson Tatum"], "BOOST": 0.10},
+    "MIL": {"OUT": ["Giannis Antetokounmpo"], "BOOST": 0.15},
+}
+
+# -------------------------
+# PROJECTION MODEL (UPGRADED)
 # -------------------------
 def project(p, stat):
     try:
         minutes = p["minutes"]
         trend = p["minutes_trend"]
+        team = p["team"]
 
-        minute_factor = max(0.85, min(1.2, trend))
+        # BASE FACTORS
+        minute_factor = max(0.85, min(1.25, trend))
         usage_factor = (p["avg_pts"] + p["avg_ast"]) / max(minutes, 1)
         efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.25)
 
+        # USAGE SPIKE
+        usage_spike = (p["last5_pts"] - p["avg_pts"]) / max(p["avg_pts"], 1)
+        usage_boost = 1.0
+        if usage_spike > 0.10:
+            usage_boost = 1.08
+        elif usage_spike > 0.05:
+            usage_boost = 1.04
+
+        # INJURY BOOST
+        injury_boost = 1.0
+        if team in INJURY_BOOSTS:
+            injury_boost += INJURY_BOOSTS[team]["BOOST"]
+
+        # PROJECTIONS
         if stat == "Points":
-            base = 0.4*p["last5_pts"] + 0.4*p["last10_pts"] + 0.2*p["avg_pts"]
+            base = 0.5*p["last5_pts"] + 0.3*p["last10_pts"] + 0.2*p["avg_pts"]
             std = max(p["std_dev"], 1)
-            proj = base * minute_factor * efficiency
+            proj = base * minute_factor * efficiency * usage_boost * injury_boost
 
         elif stat == "Rebounds":
             base = p["avg_reb"]
             std = max(p["reb_std"], 1)
-            proj = base * minute_factor
+            proj = base * minute_factor * injury_boost
 
         elif stat == "Assists":
             base = p["avg_ast"]
             std = max(p["ast_std"], 1)
-            proj = base * usage_factor
+            proj = base * usage_factor * usage_boost * injury_boost
 
         else:
             return None, None
 
         return proj, std
+
     except:
         return None, None
 
+# -------------------------
+# BUILD PROJECTIONS
+# -------------------------
 rows = []
 for _, p in player_data.iterrows():
     for stat in ["Points", "Rebounds", "Assists"]:
@@ -102,75 +132,68 @@ proj_df = pd.DataFrame(rows)
 def load_events():
     url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
     res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
-    if res.status_code != 200:
-        return []
-    return res.json()
+    return res.json() if res.status_code == 200 else []
 
 # -------------------------
 # LOAD ODDS
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_odds():
-    try:
-        events = load_events()
-        rows = []
+    rows = []
+    events = load_events()
 
-        for event in events[:MAX_GAMES]:
-            event_id = event.get("id")
+    for event in events[:MAX_GAMES]:
+        event_id = event.get("id")
 
-            url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
+        url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
 
-            params = {
-                "apiKey": ODDS_API_KEY,
-                "regions": "us",
-                "markets": "player_points,player_rebounds,player_assists",
-                "oddsFormat": "american"
-            }
+        params = {
+            "apiKey": ODDS_API_KEY,
+            "regions": "us",
+            "markets": "player_points,player_rebounds,player_assists",
+            "oddsFormat": "american"
+        }
 
-            res = requests.get(url, params=params, timeout=10)
-            if res.status_code != 200:
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            continue
+
+        data = res.json()
+
+        for book in data.get("bookmakers", []):
+            if book.get("key") not in VALID_BOOKS:
                 continue
 
-            data = res.json()
+            for market in book.get("markets", []):
+                stat_map = {
+                    "player_points": "Points",
+                    "player_rebounds": "Rebounds",
+                    "player_assists": "Assists"
+                }
 
-            for book in data.get("bookmakers", []):
-                if book.get("key") not in VALID_BOOKS:
+                stat = stat_map.get(market.get("key"))
+                if not stat:
                     continue
 
-                for market in book.get("markets", []):
-                    stat_map = {
-                        "player_points": "Points",
-                        "player_rebounds": "Rebounds",
-                        "player_assists": "Assists"
-                    }
+                for o in market.get("outcomes", []):
+                    player = o.get("description")
+                    line = o.get("point")
 
-                    stat = stat_map.get(market.get("key"))
-                    if not stat:
+                    if not player or line is None:
                         continue
 
-                    for o in market.get("outcomes", []):
-                        player = o.get("description")
-                        line = o.get("point")
+                    rows.append({
+                        "player": player,
+                        "clean_name": clean_name(player),
+                        "stat": stat,
+                        "line": float(line),
+                        "book": book.get("key")
+                    })
 
-                        if not player or line is None:
-                            continue
-
-                        rows.append({
-                            "player": player,
-                            "clean_name": clean_name(player),
-                            "stat": stat,
-                            "line": float(line),
-                            "book": book.get("key")
-                        })
-
-        return pd.DataFrame(rows)
-
-    except Exception as e:
-        st.error(f"Odds load failed: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 # -------------------------
-# BUTTON
+# BUTTON (manual API call)
 # -------------------------
 if st.button("🔄 Load / Refresh Odds"):
     with st.spinner("Fetching odds..."):
@@ -179,7 +202,7 @@ if st.button("🔄 Load / Refresh Odds"):
 odds_df = st.session_state.odds_data
 
 # -------------------------
-# BEST LINE
+# BEST LINES
 # -------------------------
 def get_best_lines(df):
     if df.empty:
@@ -192,22 +215,13 @@ def get_best_lines(df):
         .rename(columns={"line": "best_line"})
     )
 
-# -------------------------
-# LINE RANGE
-# -------------------------
 def add_line_range(df):
     if df.empty:
         return pd.DataFrame()
 
-    ranges = (
-        df.groupby(["clean_name", "stat"])["line"]
-        .agg(["min", "max"])
-        .reset_index()
-    )
-
-    ranges["line_diff"] = ranges["max"] - ranges["min"]
-
-    return ranges
+    r = df.groupby(["clean_name", "stat"])["line"].agg(["min", "max"]).reset_index()
+    r["line_diff"] = r["max"] - r["min"]
+    return r
 
 best_df = get_best_lines(odds_df)
 range_df = add_line_range(odds_df)
@@ -221,46 +235,31 @@ merged = merged.merge(range_df, on=["clean_name", "stat"], how="left")
 # -------------------------
 # EDGE
 # -------------------------
-def calculate_edge(row):
+def calc_edge(row):
     try:
         prob = 1 - norm.cdf(row["best_line"], row["projection"], row["std"])
         return prob - IMPLIED_PROB
     except:
         return None
 
-def label_edge(edge):
-    if edge is None:
-        return "N/A"
-    elif edge > 0.06:
-        return "🔥 STRONG"
-    elif edge > 0.03:
-        return "✅ PLAYABLE"
-    elif edge > 0.015:
-        return "👀 LEAN"
-    else:
-        return "❌ PASS"
+def tier(e):
+    if e is None: return "N/A"
+    if e > 0.06: return "🔥 STRONG"
+    if e > 0.03: return "✅ PLAYABLE"
+    if e > 0.015: return "👀 LEAN"
+    return "❌ PASS"
 
-# -------------------------
-# PROCESS
-# -------------------------
 if not merged.empty:
-    merged["edge"] = merged.apply(calculate_edge, axis=1)
-    merged["edge_tier"] = merged["edge"].apply(label_edge)
+    merged["edge"] = merged.apply(calc_edge, axis=1)
+    merged["edge_tier"] = merged["edge"].apply(tier)
 
-    merged = merged[
-        (merged["edge"] > 0.005) &
-        (merged["projection"] > 5)
-    ]
-
-    merged = merged.sort_values(
-        ["edge", "line_diff"],
-        ascending=[False, False]
-    )
+    merged = merged[(merged["edge"] > 0.005)]
+    merged = merged.sort_values(["edge", "line_diff"], ascending=False)
 
 # -------------------------
 # DEBUG
 # -------------------------
-st.write("Total props analyzed:", len(merged))
+st.write("Props found:", len(merged))
 st.write("Columns:", merged.columns.tolist())
 
 # -------------------------
@@ -269,34 +268,14 @@ st.write("Columns:", merged.columns.tolist())
 st.subheader("🔥 Sharp Bets")
 
 if odds_df.empty:
-    st.info("Click 'Load / Refresh Odds'")
+    st.info("Click refresh")
 elif merged.empty:
     st.warning("No sharp bets found right now")
 else:
-    # Fix player column
     if "player_x" in merged.columns:
         merged["player"] = merged["player_x"]
-    elif "player_y" in merged.columns:
-        merged["player"] = merged["player_y"]
 
-    # Ensure book exists
-    if "book" not in merged.columns:
-        merged["book"] = "N/A"
-
-    cols = [
-        "player",
-        "stat",
-        "best_line",
-        "projection",
-        "edge",
-        "edge_tier",
-        "line_diff",
-        "book"
-    ]
-
+    cols = ["player","stat","best_line","projection","edge","edge_tier","line_diff","book"]
     safe_cols = [c for c in cols if c in merged.columns]
 
-    st.dataframe(
-        merged[safe_cols].head(25),
-        use_container_width=True
-    )
+    st.dataframe(merged[safe_cols].head(25), use_container_width=True)
