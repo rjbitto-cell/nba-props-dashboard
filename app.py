@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 import requests
 from scipy.stats import norm
+import re
 
 st.set_page_config(page_title="NBA Sharp Props Tool", layout="wide")
 st.title("🏀 NBA Sharp Props Tool")
 
 IMPLIED_PROB = 0.524
+VALID_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
 
 # -------------------------
 # LOAD API KEY
@@ -14,18 +16,27 @@ IMPLIED_PROB = 0.524
 try:
     ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 except:
-    st.error("❌ Missing ODDS_API_KEY in Streamlit secrets")
+    st.error("Missing ODDS_API_KEY in secrets")
     st.stop()
 
 # -------------------------
-# LOAD PLAYER DATA
+# NAME NORMALIZATION (KEY FIX)
+# -------------------------
+def clean_name(name):
+    name = str(name).lower()
+    name = re.sub(r"[^a-z\s]", "", name)
+    name = name.replace(" jr", "").replace(" sr", "")
+    return name.strip()
+
+# -------------------------
+# LOAD DATA
 # -------------------------
 @st.cache_data
 def load_data():
     try:
         df = pd.read_csv("data/player_stats.csv")
         if df.empty:
-            raise ValueError("Empty CSV")
+            raise ValueError
         return df
     except:
         st.warning("Using fallback data")
@@ -45,6 +56,7 @@ def load_data():
         })
 
 player_data = load_data()
+player_data["clean_name"] = player_data["player"].apply(clean_name)
 
 # -------------------------
 # PROJECTION MODEL
@@ -87,7 +99,8 @@ for _, p in player_data.iterrows():
         proj, std = project(p, stat)
         if proj:
             rows.append({
-                "player": p["player"].strip(),
+                "player": p["player"],
+                "clean_name": p["clean_name"],
                 "stat": stat,
                 "projection": proj,
                 "std": std
@@ -96,25 +109,23 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# ODDS API (EVENT-BASED FIX)
+# ODDS API (EVENT-BASED)
 # -------------------------
 @st.cache_data(ttl=300)
 def load_odds():
     try:
         sport = "basketball_nba"
 
-        # STEP 1: EVENTS
         events_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
         events_res = requests.get(events_url, params={"apiKey": ODDS_API_KEY}, timeout=10)
 
         if events_res.status_code != 200:
             st.error(f"Events API failed: {events_res.status_code}")
-            return pd.DataFrame(columns=["player","stat","line","book"])
+            return pd.DataFrame()
 
         events = events_res.json()
         rows = []
 
-        # STEP 2: LOOP EVENTS
         for event in events:
             event_id = event.get("id")
             if not event_id:
@@ -136,11 +147,11 @@ def load_odds():
 
             data = res.json()
 
-            if not isinstance(data, dict):
-                continue
-
             for book in data.get("bookmakers", []):
                 book_name = book.get("key")
+
+                if book_name not in VALID_BOOKS:
+                    continue
 
                 for market in book.get("markets", []):
                     stat_map = {
@@ -161,23 +172,18 @@ def load_odds():
                             continue
 
                         rows.append({
-                            "player": player.strip(),
+                            "player": player,
+                            "clean_name": clean_name(player),
                             "stat": stat,
                             "line": float(line),
                             "book": book_name
                         })
 
-        df = pd.DataFrame(rows)
-
-        if df.empty:
-            st.warning("No props found")
-            return pd.DataFrame(columns=["player","stat","line","book"])
-
-        return df
+        return pd.DataFrame(rows)
 
     except Exception as e:
         st.error(f"Odds loading failed: {e}")
-        return pd.DataFrame(columns=["player","stat","line","book"])
+        return pd.DataFrame()
 
 odds_df = load_odds()
 
@@ -186,11 +192,11 @@ odds_df = load_odds()
 # -------------------------
 def get_best_lines(df):
     if df.empty:
-        return pd.DataFrame(columns=["player","stat","best_line","book"])
+        return pd.DataFrame()
 
     best = (
         df.sort_values("line")
-        .groupby(["player","stat"], as_index=False)
+        .groupby(["clean_name", "stat"], as_index=False)
         .first()
         .rename(columns={"line": "best_line"})
     )
@@ -202,10 +208,11 @@ best_df = get_best_lines(odds_df)
 # -------------------------
 # MERGE
 # -------------------------
-if not proj_df.empty and not best_df.empty:
-    merged = proj_df.merge(best_df, on=["player", "stat"], how="inner")
-else:
-    merged = pd.DataFrame()
+merged = proj_df.merge(
+    best_df,
+    on=["clean_name", "stat"],
+    how="inner"
+)
 
 # -------------------------
 # EDGE CALCULATION
@@ -221,12 +228,22 @@ if not merged.empty:
     merged["edge"] = merged.apply(calculate_edge, axis=1)
 
 # -------------------------
+# FILTER SHARP BETS
+# -------------------------
+if not merged.empty:
+    merged = merged[
+        (merged["edge"] > 0.03) &     # +EV
+        (merged["edge"] < 0.15) &     # remove fake edges
+        (merged["projection"] > 5)    # avoid noise
+    ]
+
+# -------------------------
 # DISPLAY
 # -------------------------
-st.subheader("🔥 Best Bets")
+st.subheader("🔥 Sharp Bets")
 
 if merged.empty:
-    st.warning("No matching odds + projections yet")
+    st.warning("No sharp bets found right now")
 else:
     merged = merged.sort_values("edge", ascending=False)
 
