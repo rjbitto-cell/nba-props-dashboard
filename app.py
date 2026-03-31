@@ -9,7 +9,7 @@ st.title("🏀 NBA Sharp Props Tool")
 
 IMPLIED_PROB = 0.524
 VALID_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
-MAX_GAMES = 10  # full slate
+MAX_GAMES = 10
 
 # -------------------------
 # API KEY
@@ -40,31 +40,14 @@ def clean_name(name):
 # -------------------------
 @st.cache_data
 def load_data():
-    try:
-        df = pd.read_csv("data/player_stats.csv")
-        return df
-    except:
-        return pd.DataFrame({
-            "player": ["LeBron James", "Stephen Curry"],
-            "team": ["LAL", "GSW"],
-            "minutes": [35, 34],
-            "minutes_trend": [1.0, 1.0],
-            "avg_pts": [27, 29],
-            "avg_reb": [8, 5],
-            "avg_ast": [7, 6],
-            "last5_pts": [28, 30],
-            "last10_pts": [27, 29],
-            "fg_pct": [0.5, 0.48],
-            "std_dev": [6, 7],
-            "reb_std": [3, 2],
-            "ast_std": [3, 3],
-        })
+    df = pd.read_csv("data/player_stats.csv")
+    df["clean_name"] = df["player"].apply(clean_name)
+    return df
 
 player_data = load_data()
-player_data["clean_name"] = player_data["player"].apply(clean_name)
 
 # -------------------------
-# PROJECTION MODEL
+# PROJECTIONS
 # -------------------------
 def project(p, stat):
     try:
@@ -97,7 +80,6 @@ def project(p, stat):
     except:
         return None, None
 
-# Build projections
 rows = []
 for _, p in player_data.iterrows():
     for stat in ["Points", "Rebounds", "Assists"]:
@@ -114,20 +96,18 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# EVENTS CACHE
+# LOAD EVENTS
 # -------------------------
 @st.cache_data(ttl=3600)
 def load_events():
     url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
     res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
-
     if res.status_code != 200:
         return []
-
     return res.json()
 
 # -------------------------
-# LOAD ODDS (ON DEMAND)
+# LOAD ODDS
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_odds():
@@ -148,7 +128,6 @@ def load_odds():
             }
 
             res = requests.get(url, params=params, timeout=10)
-
             if res.status_code != 200:
                 continue
 
@@ -214,7 +193,7 @@ def get_best_lines(df):
     )
 
 # -------------------------
-# LINE DISCREPANCY
+# LINE RANGE
 # -------------------------
 def add_line_range(df):
     if df.empty:
@@ -240,7 +219,7 @@ merged = proj_df.merge(best_df, on=["clean_name", "stat"], how="inner")
 merged = merged.merge(range_df, on=["clean_name", "stat"], how="left")
 
 # -------------------------
-# EDGE CALCULATION
+# EDGE
 # -------------------------
 def calculate_edge(row):
     try:
@@ -249,11 +228,10 @@ def calculate_edge(row):
     except:
         return None
 
-# -------------------------
-# EDGE TIERS
-# -------------------------
 def label_edge(edge):
-    if edge > 0.06:
+    if edge is None:
+        return "N/A"
+    elif edge > 0.06:
         return "🔥 STRONG"
     elif edge > 0.03:
         return "✅ PLAYABLE"
@@ -270,8 +248,7 @@ if not merged.empty:
     merged["edge_tier"] = merged["edge"].apply(label_edge)
 
     merged = merged[
-        (merged["edge"] > 0.015) &
-        (merged["edge"] < 0.12) &
+        (merged["edge"] > 0.005) &
         (merged["projection"] > 5)
     ]
 
@@ -279,6 +256,12 @@ if not merged.empty:
         ["edge", "line_diff"],
         ascending=[False, False]
     )
+
+# -------------------------
+# DEBUG
+# -------------------------
+st.write("Total props analyzed:", len(merged))
+st.write("Columns:", merged.columns.tolist())
 
 # -------------------------
 # DISPLAY
@@ -290,16 +273,30 @@ if odds_df.empty:
 elif merged.empty:
     st.warning("No sharp bets found right now")
 else:
+    # Fix player column
+    if "player_x" in merged.columns:
+        merged["player"] = merged["player_x"]
+    elif "player_y" in merged.columns:
+        merged["player"] = merged["player_y"]
+
+    # Ensure book exists
+    if "book" not in merged.columns:
+        merged["book"] = "N/A"
+
+    cols = [
+        "player",
+        "stat",
+        "best_line",
+        "projection",
+        "edge",
+        "edge_tier",
+        "line_diff",
+        "book"
+    ]
+
+    safe_cols = [c for c in cols if c in merged.columns]
+
     st.dataframe(
-        merged[[
-            "player",
-            "stat",
-            "best_line",
-            "projection",
-            "edge",
-            "edge_tier",
-            "line_diff",
-            "book"
-        ]].head(25),
+        merged[safe_cols].head(25),
         use_container_width=True
     )
