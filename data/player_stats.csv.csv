@@ -1,0 +1,6 @@
+player,team,minutes,minutes_trend,avg_pts,avg_reb,avg_ast,last5_pts,last10_pts,fg_pct,std_dev,reb_std,ast_std
+LeBron James,LAL,35,1.0,27,8,7,27,27,0.51,6,3,3
+Stephen Curry,GSW,34,1.0,29,5,6,29,29,0.48,7,3,3
+Nikola Jokic,DEN,36,1.0,26,12,9,26,26,0.57,6,4,4
+Luka Doncic,DAL,35,1.0,33,9,8,33,33,0.49,7,4,4
+Jayson Tatum,BOS,37,1.0,28,8,5,28,28,0.47,6,3,3
