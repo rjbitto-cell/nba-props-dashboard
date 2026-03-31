@@ -21,13 +21,13 @@ except:
     st.stop()
 
 # -------------------------
-# SESSION STATE
+# STATE
 # -------------------------
 if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
 
 # -------------------------
-# CLEAN NAME
+# CLEAN NAMES
 # -------------------------
 def clean_name(name):
     name = str(name).lower()
@@ -57,31 +57,28 @@ def load_team_defense():
 team_def = load_team_defense()
 
 # -------------------------
-# BUILD DVP (REAL)
+# BUILD DVP
 # -------------------------
-def build_dvp(team_def):
-    pts_col = next((c for c in team_def.columns if "pts" in c), None)
-    reb_col = next((c for c in team_def.columns if "reb" in c), None)
-    ast_col = next((c for c in team_def.columns if "ast" in c), None)
-    team_col = next((c for c in team_def.columns if "team" in c), None)
+def build_dvp(df):
+    pts = next((c for c in df.columns if "pts" in c), None)
+    reb = next((c for c in df.columns if "reb" in c), None)
+    ast = next((c for c in df.columns if "ast" in c), None)
+    team = next((c for c in df.columns if "team" in c), None)
 
-    if not all([pts_col, reb_col, ast_col, team_col]):
-        st.error("team_defense.csv missing required columns")
+    if not all([pts, reb, ast, team]):
         return {}
 
-    league_avg_pts = team_def[pts_col].mean()
-    league_avg_reb = team_def[reb_col].mean()
-    league_avg_ast = team_def[ast_col].mean()
+    avg_pts = df[pts].mean()
+    avg_reb = df[reb].mean()
+    avg_ast = df[ast].mean()
 
     dvp = {}
-
-    for _, row in team_def.iterrows():
-        dvp[row[team_col]] = {
-            "Points": row[pts_col] / league_avg_pts,
-            "Rebounds": row[reb_col] / league_avg_reb,
-            "Assists": row[ast_col] / league_avg_ast
+    for _, r in df.iterrows():
+        dvp[r[team]] = {
+            "Points": r[pts] / avg_pts,
+            "Rebounds": r[reb] / avg_reb,
+            "Assists": r[ast] / avg_ast
         }
-
     return dvp
 
 DVP = build_dvp(team_def)
@@ -95,61 +92,54 @@ def load_injuries():
         url = "https://site.web.api.espn.com/apis/v2/sports/basketball/nba/injuries"
         data = requests.get(url, timeout=10).json()
 
-        injury_map = {}
-
-        for team in data.get("teams", []):
-            abbr = team.get("team", {}).get("abbreviation")
+        out = {}
+        for t in data.get("teams", []):
+            abbr = t.get("team", {}).get("abbreviation")
 
             outs = [
                 p.get("athlete", {}).get("displayName")
-                for p in team.get("injuries", [])
+                for p in t.get("injuries", [])
                 if "out" in str(p.get("status", "")).lower()
             ]
 
             if outs:
-                injury_map[abbr] = {
-                    "OUT": outs,
-                    "BOOST": min(0.20, 0.05 * len(outs))
-                }
-
-        return injury_map if injury_map else {}
-
+                out[abbr] = {"OUT": outs, "BOOST": min(0.2, 0.05 * len(outs))}
+        return out
     except:
         return {}
 
 injuries = load_injuries()
 
 # -------------------------
-# LOAD EVENTS (BUILD MATCHUPS)
+# LOAD MATCHUPS (AUTO)
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_matchups():
     url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
     res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
 
-    matchups = {}
-
+    m = {}
     if res.status_code != 200:
-        return matchups
+        return m
 
-    for event in res.json()[:MAX_GAMES]:
-        home = event.get("home_team")
-        away = event.get("away_team")
+    for e in res.json()[:MAX_GAMES]:
+        home = e.get("home_team")
+        away = e.get("away_team")
 
-        matchups[home] = away
-        matchups[away] = home
+        m[home] = away
+        m[away] = home
 
-    return matchups
+    return m
 
 MATCHUPS = load_matchups()
 
 # -------------------------
-# PROJECTION MODEL (UPDATED)
+# PROJECTION MODEL
 # -------------------------
 def project(p, stat):
     try:
         team = p["team"]
-        opponent = MATCHUPS.get(team)
+        opp = MATCHUPS.get(team)
 
         minutes = p["minutes"]
         trend = p["minutes_trend"]
@@ -158,19 +148,16 @@ def project(p, stat):
         usage_factor = (p["avg_pts"] + p["avg_ast"]) / max(minutes, 1)
         efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.25)
 
-        # Usage spike
         usage_spike = (p["last5_pts"] - p["avg_pts"]) / max(p["avg_pts"], 1)
-        usage_boost = 1.08 if usage_spike > 0.10 else 1.04 if usage_spike > 0.05 else 1.0
+        usage_boost = 1.08 if usage_spike > 0.1 else 1.04 if usage_spike > 0.05 else 1.0
 
-        # Injury boost
         injury_boost = 1.0
         if team in injuries:
             injury_boost += injuries[team]["BOOST"]
 
-        # TRUE DVP (opponent-based)
         dvp_boost = 1.0
-        if opponent in DVP:
-            dvp_boost = DVP[opponent].get(stat, 1.0)
+        if opp in DVP:
+            dvp_boost = DVP[opp].get(stat, 1.0)
 
         if stat == "Points":
             base = 0.5*p["last5_pts"] + 0.3*p["last10_pts"] + 0.2*p["avg_pts"]
@@ -198,12 +185,12 @@ def project(p, stat):
 # -------------------------
 # BUILD PROJECTIONS
 # -------------------------
-rows = []
+proj_rows = []
 for _, p in player_data.iterrows():
     for stat in ["Points","Rebounds","Assists"]:
         proj, std = project(p, stat)
         if proj:
-            rows.append({
+            proj_rows.append({
                 "player": p["player"],
                 "clean_name": p["clean_name"],
                 "stat": stat,
@@ -211,7 +198,7 @@ for _, p in player_data.iterrows():
                 "std": std
             })
 
-proj_df = pd.DataFrame(rows)
+proj_df = pd.DataFrame(proj_rows)
 
 # -------------------------
 # LOAD ODDS
@@ -226,8 +213,8 @@ def load_odds():
         timeout=10
     ).json()
 
-    for event in events[:MAX_GAMES]:
-        event_id = event.get("id")
+    for e in events[:MAX_GAMES]:
+        event_id = e.get("id")
 
         res = requests.get(
             f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds",
@@ -281,10 +268,15 @@ odds_df = st.session_state.odds_data
 # MERGE + EDGE
 # -------------------------
 if not odds_df.empty:
+
     best = odds_df.sort_values("line").groupby(["clean_name","stat"]).first().reset_index()
     best = best.rename(columns={"line":"best_line"})
 
-    merged = proj_df.merge(best, on=["clean_name","stat"])
+    merged = proj_df.merge(best, on=["clean_name","stat"], how="inner")
+
+    # ✅ FIX PLAYER COLUMN
+    if "player_x" in merged.columns:
+        merged["player"] = merged["player_x"]
 
     merged["edge"] = merged.apply(
         lambda r: (1 - norm.cdf(r["best_line"], r["projection"], r["std"])) - IMPLIED_PROB,
@@ -295,10 +287,14 @@ if not odds_df.empty:
     merged = merged.sort_values("edge", ascending=False)
 
     st.write("Props found:", len(merged))
+    st.write("Columns:", merged.columns.tolist())
+
+    safe_cols = [c for c in ["player","stat","best_line","projection","edge"] if c in merged.columns]
 
     st.dataframe(
-        merged[["player","stat","best_line","projection","edge"]].head(25),
+        merged[safe_cols].head(25),
         use_container_width=True
     )
+
 else:
     st.info("Click Load Odds")
