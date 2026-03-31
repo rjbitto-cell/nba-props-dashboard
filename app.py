@@ -20,15 +20,15 @@ def clean_name(name):
     return str(name).lower().replace(".", "").replace("'", "").strip()
 
 # ==============================
-# FETCH PROPS (MATCHES YOUR COLAB)
+# FETCH PROPS (FINAL FIX)
 # ==============================
 def fetch_props():
     sport = "basketball_nba"
     markets = ["player_points", "player_rebounds", "player_assists"]
 
-    events_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
-    res = requests.get(events_url, params={"apiKey": API_KEY})
-    events = res.json()
+    # ✅ EXACT COLAB FORMAT
+    events_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events?apiKey={API_KEY}"
+    events = requests.get(events_url).json()
 
     st.write(f"📅 Events: {len(events)}")
 
@@ -41,23 +41,26 @@ def fetch_props():
 
         for market in markets:
 
-            odds_url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
+            # ✅ EXACT STRING URL (CRITICAL FIX)
+            url = (
+                f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
+                f"?apiKey={API_KEY}"
+                f"&regions={REGIONS}"
+                f"&markets={market}"
+                f"&oddsFormat={ODDS_FORMAT}"
+            )
 
-            params = {
-                "apiKey": API_KEY,
-                "regions": REGIONS,
-                "markets": market,
-                "oddsFormat": ODDS_FORMAT
-            }
-
-            res = requests.get(odds_url, params=params)
+            res = requests.get(url)
 
             if res.status_code != 200:
+                st.write(f"❌ Error {res.status_code}")
                 continue
 
             data = res.json()
 
-            if "bookmakers" not in data:
+            # ✅ DEBUG + SAFE
+            if "bookmakers" not in data or not data["bookmakers"]:
+                st.write(f"⚠️ No books: {away} @ {home} | {market}")
                 continue
 
             for book in data["bookmakers"]:
@@ -69,6 +72,7 @@ def fetch_props():
                 for mkt in book["markets"]:
                     for outcome in mkt["outcomes"]:
 
+                        # ONLY OVER (matches your sniper)
                         if outcome["name"] != "Over":
                             continue
 
@@ -86,7 +90,9 @@ def fetch_props():
             time.sleep(0.1)
 
     df = pd.DataFrame(rows)
+
     st.write(f"📊 Props pulled: {len(df)}")
+
     return df
 
 # ==============================
@@ -111,7 +117,7 @@ def load_players():
     return df
 
 # ==============================
-# PROJECTION MODEL (FIXED + SAFE)
+# PROJECTION MODEL (FIXED)
 # ==============================
 def project(row):
     if pd.isna(row.get("minutes")):
@@ -132,7 +138,7 @@ def project(row):
     per_min = base / mpg
     proj = per_min * min(max(mpg, 24), 36)
 
-    # regression (fix high projections)
+    # ✅ REGRESSION FIX (prevents inflated projections)
     league_avg = {
         "points": 15,
         "rebounds": 5,
@@ -144,7 +150,7 @@ def project(row):
     return round(proj, 2)
 
 # ==============================
-# SHARP ENGINE (KEY PART)
+# SHARP ENGINE (LINE + MODEL)
 # ==============================
 def find_sharp_edges(props, players):
     merged = props.merge(players, on="clean_name", how="left")
@@ -168,14 +174,14 @@ def find_sharp_edges(props, players):
         min_line = group["line"].min()
         max_line = group["line"].max()
 
-        # 🔥 LINE SNIPE CONDITION
+        # 🔥 LINE SNIPE
         if (max_line - min_line) >= 1:
 
             best_row = group[group["line"] == min_line].iloc[0]
 
             projection = best_row["projection"]
 
-            # 🔥 PROJECTION CONFIRMATION
+            # 🔥 MODEL CONFIRMATION
             if projection > min_line:
 
                 sharp_rows.append({
@@ -185,13 +191,13 @@ def find_sharp_edges(props, players):
                     "projection": projection,
                     "edge": round(max_line - min_line, 2),
                     "book": best_row["book"],
-                    "type": "LINE + MODEL CONFIRMED"
+                    "type": "LINE + MODEL"
                 })
 
     return pd.DataFrame(sharp_rows)
 
 # ==============================
-# APP
+# APP UI
 # ==============================
 st.title("🏀 NBA Sharp Props Tool")
 
@@ -204,17 +210,17 @@ if st.button("🚀 Fetch Props"):
 props = st.session_state["props"]
 
 if props is None or props.empty:
-    st.warning("Click fetch to load props")
+    st.warning("Click 'Fetch Props' to load data")
     st.stop()
 
 players = load_players()
 
 # ==============================
-# SHARP RESULTS
+# RUN SHARP ENGINE
 # ==============================
 sharp = find_sharp_edges(props, players)
 
-st.subheader("🔥 Sharp Bets (Line + Model)")
+st.subheader("🔥 Sharp Bets (Line + Model Confirmed)")
 
 if sharp.empty:
     st.write("No sharp bets right now")
@@ -225,7 +231,7 @@ else:
     )
 
 # ==============================
-# DEBUG VIEW (OPTIONAL)
+# DEBUG (OPTIONAL)
 # ==============================
-with st.expander("📊 Raw Props (debug)"):
+with st.expander("📊 Raw Props (Debug)"):
     st.dataframe(props.head(100))
