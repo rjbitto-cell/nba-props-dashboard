@@ -25,12 +25,27 @@ def clean_name(name):
 @st.cache_data
 def load_players():
     df = pd.read_csv("data/player_stats.csv")
+
+    df = df.rename(columns={
+        "Player": "player",
+        "Team": "team",
+        "MP": "minutes",
+        "PTS": "avg_pts",
+        "TRB": "avg_reb",
+        "AST": "avg_ast"
+    })
+
     df["clean_name"] = df["player"].apply(clean_name)
+
+    # normalize team abbreviations
+    df["team"] = df["team"].str.upper().str.replace("PHO", "PHX")
+
     return df
 
 @st.cache_data
 def load_team_def():
     df = pd.read_csv("data/team_defense.csv")
+    df["team"] = df["team"].str.upper()
     return df
 
 def build_dvp(team_def):
@@ -59,11 +74,11 @@ def project(row, stat, dvp=None, injury=0):
 
     proj = per_min * exp_min
 
-    # regression
+    # regression to mean
     league_avg = {"pts": 15, "reb": 5, "ast": 4}
     proj = proj * 0.7 + league_avg[stat] * 0.3
 
-    # DvP
+    # DvP adjustment
     if dvp and row.get("opponent") in dvp:
         proj *= dvp[row["opponent"]][stat]
 
@@ -73,31 +88,42 @@ def project(row, stat, dvp=None, injury=0):
     return round(proj, 2)
 
 # ==============================
-# ODDS API (ON DEMAND)
+# ODDS API (CORRECT VERSION)
 # ==============================
 def fetch_props():
-    url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
-    params = {
-        "apiKey": API_KEY,
-        "regions": REGIONS,
-        "markets": ",".join(MARKETS),
-        "oddsFormat": "american"
-    }
+    events_url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
 
-    res = requests.get(url, params=params)
+    events_res = requests.get(events_url, params={"apiKey": API_KEY})
 
-    if res.status_code != 200:
-        st.error(f"Odds API Error: {res.status_code}")
+    if events_res.status_code != 200:
+        st.error(f"Events API Error: {events_res.status_code}")
         return pd.DataFrame()
 
-    data = res.json()
+    events = events_res.json()
     rows = []
 
-    for game in data:
-        home = game["home_team"]
-        away = game["away_team"]
+    for event in events:
+        event_id = event["id"]
+        home = event["home_team"]
+        away = event["away_team"]
 
-        for book in game.get("bookmakers", []):
+        odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
+
+        params = {
+            "apiKey": API_KEY,
+            "regions": REGIONS,
+            "markets": ",".join(MARKETS),
+            "oddsFormat": "american"
+        }
+
+        res = requests.get(odds_url, params=params)
+
+        if res.status_code != 200:
+            continue
+
+        data = res.json()
+
+        for book in data.get("bookmakers", []):
             if book["key"] not in BOOKS:
                 continue
 
@@ -112,21 +138,24 @@ def fetch_props():
                 if not stat:
                     continue
 
-                for o in market["outcomes"]:
+                for o in market.get("outcomes", []):
                     rows.append({
-                        "player": o["description"],
-                        "clean_name": clean_name(o["description"]),
+                        "player": o.get("description"),
+                        "clean_name": clean_name(o.get("description")),
                         "stat": stat,
                         "line": o.get("point"),
-                        "price": o["price"],
+                        "price": o.get("price"),
                         "book": book["key"],
-                        "opponent": away if o["description"] in home else home
+                        "home_team": home,
+                        "away_team": away
                     })
+
+        time.sleep(0.2)
 
     return pd.DataFrame(rows)
 
 # ==============================
-# INJURY BOOST (SIMPLE + SAFE)
+# INJURY BOOST (SAFE)
 # ==============================
 def injury_boost(player):
     boosts = {
@@ -137,17 +166,17 @@ def injury_boost(player):
     return boosts.get(player, 0)
 
 # ==============================
-# MAIN
+# APP
 # ==============================
 st.title("🏀 NBA Sharp Props Tool")
 
-if "data" not in st.session_state:
-    st.session_state["data"] = None
+if "props" not in st.session_state:
+    st.session_state["props"] = None
 
 if st.button("🚀 Fetch Latest Props"):
-    st.session_state["data"] = fetch_props()
+    st.session_state["props"] = fetch_props()
 
-props = st.session_state["data"]
+props = st.session_state["props"]
 
 if props is None or props.empty:
     st.warning("Click button to load props")
@@ -158,7 +187,7 @@ team_def = load_team_def()
 dvp = build_dvp(team_def)
 
 # ==============================
-# BEST LINE PER PLAYER
+# BEST LINE
 # ==============================
 best = (
     props.sort_values("line")
@@ -170,6 +199,17 @@ best = (
 # MERGE
 # ==============================
 merged = best.merge(players, on="clean_name", how="inner")
+
+# ==============================
+# FIX OPPONENT (REAL MAPPING)
+# ==============================
+def get_opponent(row):
+    if row["team"] == row["home_team"]:
+        return row["away_team"]
+    else:
+        return row["home_team"]
+
+merged["opponent"] = merged.apply(get_opponent, axis=1)
 
 # ==============================
 # PROJECTIONS
@@ -191,7 +231,7 @@ merged["edge"] = (merged["projection"] - merged["line"]) / merged["line"]
 merged["confidence"] = merged["minutes"] / 36
 
 # ==============================
-# FILTER (SHARP)
+# SHARP FILTER
 # ==============================
 sharp = merged[
     (merged["edge"] > 0.08) &
