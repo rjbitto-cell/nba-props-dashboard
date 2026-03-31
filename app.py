@@ -27,7 +27,7 @@ if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
 
 # -------------------------
-# CLEAN NAMES
+# CLEAN NAME
 # -------------------------
 def clean_name(name):
     name = str(name).lower()
@@ -46,38 +46,40 @@ def load_players():
 player_data = load_players()
 
 # -------------------------
-# LOAD TEAM DEFENSE (NEW)
+# LOAD TEAM DEFENSE
 # -------------------------
 @st.cache_data
 def load_team_defense():
-    try:
-        df = pd.read_csv("data/team_defense.csv")
-        return df
-    except:
-        return pd.DataFrame()
+    df = pd.read_csv("data/team_defense.csv")
+    df.columns = [c.lower() for c in df.columns]
+    return df
 
 team_def = load_team_defense()
 
 # -------------------------
-# BUILD REAL DVP
+# BUILD DVP (REAL)
 # -------------------------
 def build_dvp(team_def):
-    if team_def.empty:
+    pts_col = next((c for c in team_def.columns if "pts" in c), None)
+    reb_col = next((c for c in team_def.columns if "reb" in c), None)
+    ast_col = next((c for c in team_def.columns if "ast" in c), None)
+    team_col = next((c for c in team_def.columns if "team" in c), None)
+
+    if not all([pts_col, reb_col, ast_col, team_col]):
+        st.error("team_defense.csv missing required columns")
         return {}
 
-    league_avg_pts = team_def["pts_allowed"].mean()
-    league_avg_reb = team_def["reb_allowed"].mean()
-    league_avg_ast = team_def["ast_allowed"].mean()
+    league_avg_pts = team_def[pts_col].mean()
+    league_avg_reb = team_def[reb_col].mean()
+    league_avg_ast = team_def[ast_col].mean()
 
     dvp = {}
 
     for _, row in team_def.iterrows():
-        team = row["team"]
-
-        dvp[team] = {
-            "Points": row["pts_allowed"] / league_avg_pts,
-            "Rebounds": row["reb_allowed"] / league_avg_reb,
-            "Assists": row["ast_allowed"] / league_avg_ast
+        dvp[row[team_col]] = {
+            "Points": row[pts_col] / league_avg_pts,
+            "Rebounds": row[reb_col] / league_avg_reb,
+            "Assists": row[ast_col] / league_avg_ast
         }
 
     return dvp
@@ -85,73 +87,90 @@ def build_dvp(team_def):
 DVP = build_dvp(team_def)
 
 # -------------------------
-# INJURIES (AUTO + FALLBACK)
+# INJURIES
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_injuries():
     try:
         url = "https://site.web.api.espn.com/apis/v2/sports/basketball/nba/injuries"
-        res = requests.get(url, timeout=10)
-        data = res.json()
+        data = requests.get(url, timeout=10).json()
 
         injury_map = {}
 
         for team in data.get("teams", []):
-            team_abbr = team.get("team", {}).get("abbreviation")
-            injuries = team.get("injuries", [])
+            abbr = team.get("team", {}).get("abbreviation")
 
-            out_players = [
+            outs = [
                 p.get("athlete", {}).get("displayName")
-                for p in injuries
+                for p in team.get("injuries", [])
                 if "out" in str(p.get("status", "")).lower()
             ]
 
-            if out_players:
-                injury_map[team_abbr] = {
-                    "OUT": out_players,
-                    "BOOST": min(0.20, 0.05 * len(out_players))
+            if outs:
+                injury_map[abbr] = {
+                    "OUT": outs,
+                    "BOOST": min(0.20, 0.05 * len(outs))
                 }
 
-        if not injury_map:
-            return {"LAL": {"OUT": ["LeBron James"], "BOOST": 0.12}}
-
-        return injury_map
+        return injury_map if injury_map else {}
 
     except:
-        return {"LAL": {"OUT": ["LeBron James"], "BOOST": 0.12}}
+        return {}
 
 injuries = load_injuries()
 
 # -------------------------
-# PROJECTION MODEL
+# LOAD EVENTS (BUILD MATCHUPS)
+# -------------------------
+@st.cache_data(ttl=1800)
+def load_matchups():
+    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
+    res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
+
+    matchups = {}
+
+    if res.status_code != 200:
+        return matchups
+
+    for event in res.json()[:MAX_GAMES]:
+        home = event.get("home_team")
+        away = event.get("away_team")
+
+        matchups[home] = away
+        matchups[away] = home
+
+    return matchups
+
+MATCHUPS = load_matchups()
+
+# -------------------------
+# PROJECTION MODEL (UPDATED)
 # -------------------------
 def project(p, stat):
     try:
+        team = p["team"]
+        opponent = MATCHUPS.get(team)
+
         minutes = p["minutes"]
         trend = p["minutes_trend"]
-        team = p["team"]
 
         minute_factor = max(0.85, min(1.25, trend))
         usage_factor = (p["avg_pts"] + p["avg_ast"]) / max(minutes, 1)
         efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.25)
 
-        # USAGE SPIKE
+        # Usage spike
         usage_spike = (p["last5_pts"] - p["avg_pts"]) / max(p["avg_pts"], 1)
-        usage_boost = 1.0
-        if usage_spike > 0.10:
-            usage_boost = 1.08
-        elif usage_spike > 0.05:
-            usage_boost = 1.04
+        usage_boost = 1.08 if usage_spike > 0.10 else 1.04 if usage_spike > 0.05 else 1.0
 
-        # INJURY BOOST
+        # Injury boost
         injury_boost = 1.0
         if team in injuries:
             injury_boost += injuries[team]["BOOST"]
 
-        # REAL DVP
+        # TRUE DVP (opponent-based)
         dvp_boost = 1.0
-        if team in DVP:
-            dvp_boost = DVP[team].get(stat, 1.0)
+        if opponent in DVP:
+            dvp_boost = DVP[opponent].get(stat, 1.0)
 
         if stat == "Points":
             base = 0.5*p["last5_pts"] + 0.3*p["last10_pts"] + 0.2*p["avg_pts"]
@@ -181,7 +200,7 @@ def project(p, stat):
 # -------------------------
 rows = []
 for _, p in player_data.iterrows():
-    for stat in ["Points", "Rebounds", "Assists"]:
+    for stat in ["Points","Rebounds","Assists"]:
         proj, std = project(p, stat)
         if proj:
             rows.append({
@@ -195,7 +214,7 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# LOAD ODDS (ON DEMAND)
+# LOAD ODDS
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_odds():
@@ -229,9 +248,9 @@ def load_odds():
 
             for market in book["markets"]:
                 stat_map = {
-                    "player_points": "Points",
-                    "player_rebounds": "Rebounds",
-                    "player_assists": "Assists"
+                    "player_points":"Points",
+                    "player_rebounds":"Rebounds",
+                    "player_assists":"Assists"
                 }
 
                 stat = stat_map.get(market["key"])
@@ -272,6 +291,7 @@ if not odds_df.empty:
         axis=1
     )
 
+    merged = merged[merged["edge"] > 0.005]
     merged = merged.sort_values("edge", ascending=False)
 
     st.write("Props found:", len(merged))
