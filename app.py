@@ -9,7 +9,7 @@ st.title("🏀 NBA Sharp Props Tool")
 
 IMPLIED_PROB = 0.524
 VALID_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars"]
-MAX_GAMES = 4  # limit API usage
+MAX_GAMES = 10  # full slate
 
 # -------------------------
 # API KEY
@@ -21,7 +21,7 @@ except:
     st.stop()
 
 # -------------------------
-# SESSION STATE (KEY FEATURE)
+# SESSION STATE
 # -------------------------
 if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
@@ -71,9 +71,9 @@ def project(p, stat):
         minutes = p["minutes"]
         trend = p["minutes_trend"]
 
-        minute_factor = max(0.8, min(1.2, trend))
+        minute_factor = max(0.85, min(1.2, trend))
         usage_factor = (p["avg_pts"] + p["avg_ast"]) / max(minutes, 1)
-        efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.3)
+        efficiency = 1 + ((p["fg_pct"] - 0.45) * 0.25)
 
         if stat == "Points":
             base = 0.4*p["last5_pts"] + 0.4*p["last10_pts"] + 0.2*p["avg_pts"]
@@ -114,7 +114,7 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# CACHE EVENTS (SAVES CALLS)
+# EVENTS CACHE
 # -------------------------
 @st.cache_data(ttl=3600)
 def load_events():
@@ -191,17 +191,17 @@ def load_odds():
         return pd.DataFrame()
 
 # -------------------------
-# BUTTON (KEY FEATURE)
+# BUTTON
 # -------------------------
 if st.button("🔄 Load / Refresh Odds"):
     with st.spinner("Fetching odds..."):
         st.session_state.odds_data = load_odds()
 
-# -------------------------
-# USE STORED DATA
-# -------------------------
 odds_df = st.session_state.odds_data
 
+# -------------------------
+# BEST LINE
+# -------------------------
 def get_best_lines(df):
     if df.empty:
         return pd.DataFrame()
@@ -213,15 +213,34 @@ def get_best_lines(df):
         .rename(columns={"line": "best_line"})
     )
 
+# -------------------------
+# LINE DISCREPANCY
+# -------------------------
+def add_line_range(df):
+    if df.empty:
+        return pd.DataFrame()
+
+    ranges = (
+        df.groupby(["clean_name", "stat"])["line"]
+        .agg(["min", "max"])
+        .reset_index()
+    )
+
+    ranges["line_diff"] = ranges["max"] - ranges["min"]
+
+    return ranges
+
 best_df = get_best_lines(odds_df)
+range_df = add_line_range(odds_df)
 
 # -------------------------
 # MERGE
 # -------------------------
 merged = proj_df.merge(best_df, on=["clean_name", "stat"], how="inner")
+merged = merged.merge(range_df, on=["clean_name", "stat"], how="left")
 
 # -------------------------
-# EDGE
+# EDGE CALCULATION
 # -------------------------
 def calculate_edge(row):
     try:
@@ -230,14 +249,36 @@ def calculate_edge(row):
     except:
         return None
 
+# -------------------------
+# EDGE TIERS
+# -------------------------
+def label_edge(edge):
+    if edge > 0.06:
+        return "🔥 STRONG"
+    elif edge > 0.03:
+        return "✅ PLAYABLE"
+    elif edge > 0.015:
+        return "👀 LEAN"
+    else:
+        return "❌ PASS"
+
+# -------------------------
+# PROCESS
+# -------------------------
 if not merged.empty:
     merged["edge"] = merged.apply(calculate_edge, axis=1)
+    merged["edge_tier"] = merged["edge"].apply(label_edge)
 
     merged = merged[
-        (merged["edge"] > 0.03) &
-        (merged["edge"] < 0.15) &
+        (merged["edge"] > 0.015) &
+        (merged["edge"] < 0.12) &
         (merged["projection"] > 5)
     ]
+
+    merged = merged.sort_values(
+        ["edge", "line_diff"],
+        ascending=[False, False]
+    )
 
 # -------------------------
 # DISPLAY
@@ -245,12 +286,10 @@ if not merged.empty:
 st.subheader("🔥 Sharp Bets")
 
 if odds_df.empty:
-    st.info("Click 'Load / Refresh Odds' to fetch data")
+    st.info("Click 'Load / Refresh Odds'")
 elif merged.empty:
     st.warning("No sharp bets found right now")
 else:
-    merged = merged.sort_values("edge", ascending=False)
-
     st.dataframe(
         merged[[
             "player",
@@ -258,6 +297,8 @@ else:
             "best_line",
             "projection",
             "edge",
+            "edge_tier",
+            "line_diff",
             "book"
         ]].head(25),
         use_container_width=True
