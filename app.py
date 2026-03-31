@@ -27,39 +27,65 @@ if "odds_data" not in st.session_state:
     st.session_state.odds_data = pd.DataFrame()
 
 # -------------------------
-# NAME CLEANING
+# CLEAN NAMES
 # -------------------------
 def clean_name(name):
     name = str(name).lower()
     name = re.sub(r"[^a-z\s]", "", name)
-    name = name.replace(" jr", "").replace(" sr", "")
-    return name.strip()
+    return name.replace(" jr", "").replace(" sr", "").strip()
 
 # -------------------------
 # LOAD PLAYER DATA
 # -------------------------
 @st.cache_data
-def load_data():
+def load_players():
     df = pd.read_csv("data/player_stats.csv")
     df["clean_name"] = df["player"].apply(clean_name)
     return df
 
-player_data = load_data()
+player_data = load_players()
 
 # -------------------------
-# DEFENSE VS POSITION (DVP)
+# LOAD TEAM DEFENSE (NEW)
 # -------------------------
-DVP = {
-    "LAL": {"Points": 1.05, "Rebounds": 1.02, "Assists": 1.08},
-    "DAL": {"Points": 1.08, "Rebounds": 1.00, "Assists": 1.05},
-    "BOS": {"Points": 0.95, "Rebounds": 0.98, "Assists": 0.94},
-    "MIL": {"Points": 1.02, "Rebounds": 1.10, "Assists": 1.00},
-    "IND": {"Points": 1.12, "Rebounds": 1.05, "Assists": 1.10},
-    "ATL": {"Points": 1.10, "Rebounds": 1.03, "Assists": 1.12},
-}
+@st.cache_data
+def load_team_defense():
+    try:
+        df = pd.read_csv("data/team_defense.csv")
+        return df
+    except:
+        return pd.DataFrame()
+
+team_def = load_team_defense()
 
 # -------------------------
-# AUTO INJURY FETCH (WITH FALLBACK)
+# BUILD REAL DVP
+# -------------------------
+def build_dvp(team_def):
+    if team_def.empty:
+        return {}
+
+    league_avg_pts = team_def["pts_allowed"].mean()
+    league_avg_reb = team_def["reb_allowed"].mean()
+    league_avg_ast = team_def["ast_allowed"].mean()
+
+    dvp = {}
+
+    for _, row in team_def.iterrows():
+        team = row["team"]
+
+        dvp[team] = {
+            "Points": row["pts_allowed"] / league_avg_pts,
+            "Rebounds": row["reb_allowed"] / league_avg_reb,
+            "Assists": row["ast_allowed"] / league_avg_ast
+        }
+
+    return dvp
+
+DVP = build_dvp(team_def)
+
+# -------------------------
+# INJURIES (AUTO + FALLBACK)
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_injuries():
@@ -74,14 +100,11 @@ def load_injuries():
             team_abbr = team.get("team", {}).get("abbreviation")
             injuries = team.get("injuries", [])
 
-            out_players = []
-
-            for p in injuries:
-                status = str(p.get("status", "")).lower()
-                name = p.get("athlete", {}).get("displayName")
-
-                if "out" in status or "inactive" in status:
-                    out_players.append(name)
+            out_players = [
+                p.get("athlete", {}).get("displayName")
+                for p in injuries
+                if "out" in str(p.get("status", "")).lower()
+            ]
 
             if out_players:
                 injury_map[team_abbr] = {
@@ -89,25 +112,18 @@ def load_injuries():
                     "BOOST": min(0.20, 0.05 * len(out_players))
                 }
 
-        # ✅ FALLBACK if empty
         if not injury_map:
-            return {
-                "LAL": {"OUT": ["LeBron James"], "BOOST": 0.12},
-                "DAL": {"OUT": ["Luka Doncic"], "BOOST": 0.15},
-            }
+            return {"LAL": {"OUT": ["LeBron James"], "BOOST": 0.12}}
 
         return injury_map
 
     except:
-        return {
-            "LAL": {"OUT": ["LeBron James"], "BOOST": 0.12},
-            "DAL": {"OUT": ["Luka Doncic"], "BOOST": 0.15},
-        }
+        return {"LAL": {"OUT": ["LeBron James"], "BOOST": 0.12}}
 
 injuries = load_injuries()
 
 # -------------------------
-# PROJECTION MODEL (FINAL)
+# PROJECTION MODEL
 # -------------------------
 def project(p, stat):
     try:
@@ -132,12 +148,11 @@ def project(p, stat):
         if team in injuries:
             injury_boost += injuries[team]["BOOST"]
 
-        # DVP BOOST
+        # REAL DVP
         dvp_boost = 1.0
         if team in DVP:
             dvp_boost = DVP[team].get(stat, 1.0)
 
-        # PROJECTIONS
         if stat == "Points":
             base = 0.5*p["last5_pts"] + 0.3*p["last10_pts"] + 0.2*p["avg_pts"]
             std = max(p["std_dev"], 1)
@@ -180,68 +195,57 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# LOAD EVENTS
-# -------------------------
-@st.cache_data(ttl=3600)
-def load_events():
-    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
-    res = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=10)
-    return res.json() if res.status_code == 200 else []
-
-# -------------------------
-# LOAD ODDS
+# LOAD ODDS (ON DEMAND)
 # -------------------------
 @st.cache_data(ttl=1800)
 def load_odds():
     rows = []
-    events = load_events()
+
+    events = requests.get(
+        "https://api.the-odds-api.com/v4/sports/basketball_nba/events",
+        params={"apiKey": ODDS_API_KEY},
+        timeout=10
+    ).json()
 
     for event in events[:MAX_GAMES]:
         event_id = event.get("id")
 
-        url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
+        res = requests.get(
+            f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds",
+            params={
+                "apiKey": ODDS_API_KEY,
+                "regions": "us",
+                "markets": "player_points,player_rebounds,player_assists"
+            },
+            timeout=10
+        )
 
-        params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": "us",
-            "markets": "player_points,player_rebounds,player_assists",
-            "oddsFormat": "american"
-        }
-
-        res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
             continue
 
-        data = res.json()
-
-        for book in data.get("bookmakers", []):
-            if book.get("key") not in VALID_BOOKS:
+        for book in res.json().get("bookmakers", []):
+            if book["key"] not in VALID_BOOKS:
                 continue
 
-            for market in book.get("markets", []):
+            for market in book["markets"]:
                 stat_map = {
                     "player_points": "Points",
                     "player_rebounds": "Rebounds",
                     "player_assists": "Assists"
                 }
 
-                stat = stat_map.get(market.get("key"))
-                if not stat:
-                    continue
+                stat = stat_map.get(market["key"])
 
-                for o in market.get("outcomes", []):
-                    player = o.get("description")
-                    line = o.get("point")
-
-                    if not player or line is None:
+                for o in market["outcomes"]:
+                    if not o.get("point"):
                         continue
 
                     rows.append({
-                        "player": player,
-                        "clean_name": clean_name(player),
+                        "player": o["description"],
+                        "clean_name": clean_name(o["description"]),
                         "stat": stat,
-                        "line": float(line),
-                        "book": book.get("key")
+                        "line": float(o["point"]),
+                        "book": book["key"]
                     })
 
     return pd.DataFrame(rows)
@@ -249,92 +253,32 @@ def load_odds():
 # -------------------------
 # BUTTON
 # -------------------------
-if st.button("🔄 Load / Refresh Odds"):
-    with st.spinner("Fetching odds..."):
-        st.session_state.odds_data = load_odds()
+if st.button("🔄 Load Odds"):
+    st.session_state.odds_data = load_odds()
 
 odds_df = st.session_state.odds_data
 
 # -------------------------
-# BEST LINES + RANGE
+# MERGE + EDGE
 # -------------------------
-def get_best_lines(df):
-    if df.empty:
-        return pd.DataFrame()
+if not odds_df.empty:
+    best = odds_df.sort_values("line").groupby(["clean_name","stat"]).first().reset_index()
+    best = best.rename(columns={"line":"best_line"})
 
-    return (
-        df.sort_values("line")
-        .groupby(["clean_name", "stat"], as_index=False)
-        .first()
-        .rename(columns={"line": "best_line"})
+    merged = proj_df.merge(best, on=["clean_name","stat"])
+
+    merged["edge"] = merged.apply(
+        lambda r: (1 - norm.cdf(r["best_line"], r["projection"], r["std"])) - IMPLIED_PROB,
+        axis=1
     )
 
-def add_line_range(df):
-    if df.empty:
-        return pd.DataFrame()
+    merged = merged.sort_values("edge", ascending=False)
 
-    r = df.groupby(["clean_name", "stat"])["line"].agg(["min", "max"]).reset_index()
-    r["line_diff"] = r["max"] - r["min"]
-    return r
+    st.write("Props found:", len(merged))
 
-best_df = get_best_lines(odds_df)
-range_df = add_line_range(odds_df)
-
-# -------------------------
-# MERGE
-# -------------------------
-merged = proj_df.merge(best_df, on=["clean_name", "stat"], how="inner")
-merged = merged.merge(range_df, on=["clean_name", "stat"], how="left")
-
-# -------------------------
-# EDGE
-# -------------------------
-def calc_edge(row):
-    try:
-        prob = 1 - norm.cdf(row["best_line"], row["projection"], row["std"])
-        return prob - IMPLIED_PROB
-    except:
-        return None
-
-def tier(e):
-    if e is None: return "N/A"
-    if e > 0.06: return "🔥 STRONG"
-    if e > 0.03: return "✅ PLAYABLE"
-    if e > 0.015: return "👀 LEAN"
-    return "❌ PASS"
-
-if not merged.empty:
-    merged["edge"] = merged.apply(calc_edge, axis=1)
-    merged["edge_tier"] = merged["edge"].apply(tier)
-    merged = merged[merged["edge"] > 0.005]
-    merged = merged.sort_values(["edge", "line_diff"], ascending=False)
-
-# -------------------------
-# DEBUG
-# -------------------------
-st.write("Props found:", len(merged))
-st.write("Columns:", merged.columns.tolist())
-
-# -------------------------
-# INJURY DISPLAY
-# -------------------------
-with st.expander("🚑 Injury Report"):
-    st.write(injuries)
-
-# -------------------------
-# DISPLAY
-# -------------------------
-st.subheader("🔥 Sharp Bets")
-
-if odds_df.empty:
-    st.info("Click refresh")
-elif merged.empty:
-    st.warning("No sharp bets found right now")
+    st.dataframe(
+        merged[["player","stat","best_line","projection","edge"]].head(25),
+        use_container_width=True
+    )
 else:
-    if "player_x" in merged.columns:
-        merged["player"] = merged["player_x"]
-
-    cols = ["player","stat","best_line","projection","edge","edge_tier","line_diff","book"]
-    safe_cols = [c for c in cols if c in merged.columns]
-
-    st.dataframe(merged[safe_cols].head(25), use_container_width=True)
+    st.info("Click Load Odds")
