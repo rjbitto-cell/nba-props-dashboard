@@ -9,12 +9,12 @@ st.title("🏀 NBA Sharp Props Tool")
 IMPLIED_PROB = 0.524
 
 # -------------------------
-# LOAD API KEY SECURELY
+# LOAD API KEY
 # -------------------------
 try:
     ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 except:
-    st.error("❌ Missing ODDS_API_KEY in Streamlit secrets")
+    st.error("Missing ODDS_API_KEY in Streamlit secrets")
     st.stop()
 
 # -------------------------
@@ -24,21 +24,17 @@ except:
 def load_data():
     try:
         player_data = pd.read_csv("data/player_stats.csv")
-        defense_data = pd.read_csv("data/team_defense.csv")
-        matchups = pd.read_csv("data/matchups.csv")
 
         if player_data.empty:
             raise ValueError("Empty player data")
 
-        return player_data, defense_data, matchups
+        return player_data
 
     except Exception as e:
         st.warning(f"Using fallback data: {e}")
 
-        player_data = pd.DataFrame({
+        return pd.DataFrame({
             "player": ["LeBron James", "Stephen Curry"],
-            "team": ["LAL", "GSW"],
-            "position": ["SF", "PG"],
             "minutes": [35, 34],
             "minutes_trend": [1.0, 1.0],
             "avg_pts": [27, 29],
@@ -52,9 +48,7 @@ def load_data():
             "ast_std": [3, 3],
         })
 
-        return player_data, pd.DataFrame(), pd.DataFrame()
-
-player_data, defense_data, matchups = load_data()
+player_data = load_data()
 
 # -------------------------
 # PROJECTION MODEL
@@ -98,7 +92,7 @@ for _, p in player_data.iterrows():
         proj, std = project(p, stat)
         if proj:
             rows.append({
-                "player": p["player"],
+                "player": p["player"].strip(),
                 "stat": stat,
                 "projection": proj,
                 "std": std
@@ -107,7 +101,7 @@ for _, p in player_data.iterrows():
 proj_df = pd.DataFrame(rows)
 
 # -------------------------
-# ODDS API
+# ODDS API (FULLY SAFE)
 # -------------------------
 @st.cache_data(ttl=300)
 def load_odds():
@@ -122,13 +116,26 @@ def load_odds():
         }
 
         res = requests.get(url, params=params, timeout=10)
+
+        if res.status_code != 200:
+            st.error(f"Odds API HTTP Error: {res.status_code}")
+            return pd.DataFrame(columns=["player","stat","line","book"])
+
         data = res.json()
+
+        # Handle API error responses
+        if isinstance(data, dict):
+            st.error(f"Odds API Error: {data}")
+            return pd.DataFrame(columns=["player","stat","line","book"])
 
         rows = []
 
         for game in data:
+            if not isinstance(game, dict):
+                continue
+
             for book in game.get("bookmakers", []):
-                book_name = book["key"]
+                book_name = book.get("key")
 
                 for market in book.get("markets", []):
                     stat_map = {
@@ -137,11 +144,11 @@ def load_odds():
                         "player_assists": "Assists"
                     }
 
-                    stat = stat_map.get(market["key"])
+                    stat = stat_map.get(market.get("key"))
                     if not stat:
                         continue
 
-                    for o in market["outcomes"]:
+                    for o in market.get("outcomes", []):
                         player = o.get("description")
                         line = o.get("point")
 
@@ -149,7 +156,7 @@ def load_odds():
                             continue
 
                         rows.append({
-                            "player": player,
+                            "player": player.strip(),
                             "stat": stat,
                             "line": float(line),
                             "book": book_name
@@ -158,35 +165,46 @@ def load_odds():
         df = pd.DataFrame(rows)
 
         if df.empty:
-            st.warning("No odds data returned")
-            return df
+            st.warning("No odds data found")
+            return pd.DataFrame(columns=["player","stat","line","book"])
 
         return df
 
     except Exception as e:
         st.error(f"Odds API failed: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["player","stat","line","book"])
 
 odds_df = load_odds()
 
 # -------------------------
-# BEST LINE SELECTION
+# BEST LINE
 # -------------------------
 def get_best_lines(df):
     if df.empty:
-        return df
+        return pd.DataFrame(columns=["player","stat","best_line","book"])
 
-    best = df.sort_values("line").groupby(["player", "stat"]).first().reset_index()
-    best = best.rename(columns={"line": "best_line"})
+    best = (
+        df.sort_values("line")
+        .groupby(["player","stat"], as_index=False)
+        .first()
+        .rename(columns={"line": "best_line"})
+    )
+
     return best
 
 best_df = get_best_lines(odds_df)
 
 # -------------------------
-# MERGE + EDGE
+# MERGE SAFELY
 # -------------------------
-merged = proj_df.merge(best_df, on=["player", "stat"], how="inner")
+if not proj_df.empty and not best_df.empty:
+    merged = proj_df.merge(best_df, on=["player", "stat"], how="inner")
+else:
+    merged = pd.DataFrame()
 
+# -------------------------
+# EDGE CALCULATION
+# -------------------------
 def calculate_edge(row):
     try:
         prob = 1 - norm.cdf(row["best_line"], row["projection"], row["std"])
@@ -200,10 +218,10 @@ if not merged.empty:
 # -------------------------
 # DISPLAY
 # -------------------------
-st.subheader("🔥 Best Bets (Auto Odds)")
+st.subheader("🔥 Best Bets")
 
 if merged.empty:
-    st.warning("No matching odds or projections found")
+    st.warning("No matching odds + projections yet")
 else:
     merged = merged.sort_values("edge", ascending=False)
 
